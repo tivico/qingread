@@ -10,28 +10,49 @@
   const rendered = new Map();
   let currentJob = null;
   let layoutStyle = null;
+  let collectionEpoch = 0, summaryEpoch = 0;
   const normalize = text => text.replace(/\s+/gu, ' ').trim();
-  function distance(element) {
-    const rect = element.getBoundingClientRect();
+  const readContext = () => ({ancestors:new WeakMap(),excluded:new WeakMap(),clientRects:new WeakMap(),rects:new WeakMap()});
+  function rectOf(element, context) {
+    if (!context.rects.has(element)) context.rects.set(element,element.getBoundingClientRect());
+    return context.rects.get(element);
+  }
+  function distance(element, context = readContext()) {
+    const rect = rectOf(element,context);
     if (rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth) return 0;
     return 1 + Math.max(0, rect.top - innerHeight, -rect.bottom, rect.left - innerWidth, -rect.right);
   }
-  function allowed(node) {
+  function allowed(node, context = readContext()) {
     const element = node.parentElement;
-    if (!element || element.closest(EXCLUDE)) return false;
+    if (!element) return false;
+    if (!context.excluded.has(element)) context.excluded.set(element,Boolean(element.closest(EXCLUDE)));
+    if (context.excluded.get(element)) return false;
+    const trail = [];
+    let visible = true;
     for (let parent = element; parent; parent = parent.parentElement) {
-      const style = getComputedStyle(parent);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
-      const rect = parent.getBoundingClientRect();
-      if ((['hidden','clip'].includes(style.overflowY) && rect.height <= 0) || (['hidden','clip'].includes(style.overflowX) && rect.width <= 0)) return false;
+      if (context.ancestors.has(parent)) {visible=context.ancestors.get(parent);break;}
+      trail.push(parent);
     }
-    return element.getClientRects().length > 0;
+    for (const parent of trail.reverse()) {
+      if (!visible) {context.ancestors.set(parent,false);continue;}
+      const style = getComputedStyle(parent);
+      visible = !(style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0);
+      if (visible && (['hidden','clip'].includes(style.overflowY) || ['hidden','clip'].includes(style.overflowX))) {
+        const rect = rectOf(parent,context);
+        visible = !((['hidden','clip'].includes(style.overflowY) && rect.height <= 0) || (['hidden','clip'].includes(style.overflowX) && rect.width <= 0));
+      }
+      context.ancestors.set(parent,visible);
+    }
+    if (!visible) return false;
+    if (!context.clientRects.has(element)) context.clientRects.set(element,element.getClientRects().length > 0);
+    return context.clientRects.get(element);
   }
-  function textOf(record) {
-    if (!record.element.isConnected || record.nodes.some(n => !n.isConnected || !record.element.contains(n) || !allowed(n))) return null;
+  function textOf(record, context = readContext()) {
+    if (!record.element.isConnected || record.nodes.some(n => !n.isConnected || !record.element.contains(n) || !allowed(n,context))) return null;
     return normalize(record.nodes.map(n => n.textContent).join(''));
   }
   function removeTranslations() {
+    collectionEpoch++;summaryEpoch++;
     for (const item of rendered.values()) item.host.remove();
     rendered.clear(); records.clear(); currentJob = null;
     layoutStyle?.remove(); layoutStyle = null;
@@ -71,7 +92,7 @@
       return {url, title:(frame.title || '內嵌頁面').slice(0,80)};
     });
   }
-  function collect(message) {
+  async function collect(message) {
     const primaryRoot = readingRoot(message.scope);
     // FAQs are supplementary reading content, not a replacement for the course.
     const faqRoots = message.scope !== 'selection' && /(^|\.)skilljar\.com$/.test(location.hostname)
@@ -81,6 +102,7 @@
     const frames = message.scope === 'selection' ? [] : embeddedPages();
     const courseShell = location.hostname === 'learn.nvidia.com' && /^\/courses\/course\/?$/.test(location.pathname) && frames.length > 0 && message.scope !== 'selection';
     const summary = message.type === 'qingread:summary-source';
+    const epoch = summary ? ++summaryEpoch : ++collectionEpoch;
     if (!summary) { records.clear(); currentJob = message.job; }
     for (const [element, item] of rendered) {
       if (!element.isConnected || !item.host.isConnected || textOf(item.record) !== item.record.text) {
@@ -96,12 +118,22 @@
     const range = selection?.getRangeAt(0);
     const groups = new Map();
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let context = readContext(), changed = false;
+    const observer = new MutationObserver(()=>{changed=true;});
+    observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
+    const valid = () => !changed && !observer.takeRecords().length && (summary ? epoch===summaryEpoch : epoch===collectionEpoch && currentJob===message.job);
     let visited = 0;
     let node;
+    try {
     while ((node = walker.nextNode())) {
       if (++visited > 25000) break;
+      if (visited % 512 === 0) {
+        await new Promise(resolve=>setTimeout(resolve,0));
+        if (!valid()) return {error:'changed'};
+        context = readContext();
+      }
       // Whitespace-only nodes can separate two inline spans ("Hello" + " " + "world").
-      if (!node.textContent || !allowed(node)) continue;
+      if (!node.textContent || !allowed(node,context)) continue;
       if (faqRoots.length && !primaryRoot?.contains(node) && !faqRoots.some(faq => faq.contains(node))) continue;
       if (!range && (node.parentElement.closest(PAGE_CHROME) || (isWikipedia && node.parentElement.closest(WIKI_CHROME)))) continue;
       if (range && !range.intersectsNode(node)) continue;
@@ -120,7 +152,8 @@
     let characters = 0, alreadyTranslated = 0;
     let limited = visited > 25000;
     const ordered = [...groups.values()];
-    if (!range && !summary) ordered.sort((a,b) => distance(a.element)-distance(b.element));
+    context = readContext();
+    if (!range && !summary) ordered.sort((a,b) => distance(a.element,context)-distance(b.element,context));
     for (const group of ordered) {
       const text = normalize(group.parts.join(''));
       if (text.length < 2 || !/\p{L}/u.test(text)) continue;
@@ -131,10 +164,13 @@
       const id = crypto.randomUUID();
       // Full node text is used solely for detecting page edits during translation.
       const record = { element: group.element, nodes: group.nodes, text: normalize(group.nodes.map(n => n.textContent).join('')) };
+      if (textOf(record,context) !== record.text) return {error:'changed'};
       if (!summary) records.set(id, record);
       items.push({ id, text }); characters += text.length;
     }
+    if (!valid()) return {error:'changed'};
     return { items, frames, characters, limited, alreadyTranslated, reason: !items.length && alreadyTranslated ? 'translated' : undefined };
+    } finally { observer.disconnect(); }
   }
   function apply(message) {
     if (message.job !== currentJob) return { applied: false };
@@ -170,12 +206,16 @@
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL('panel.html'))) return;
     try {
-      if (['qingread:collect','qingread:summary-source'].includes(message?.type) && typeof message.job === 'string') respond(collect(message));
+      if (['qingread:collect','qingread:summary-source'].includes(message?.type) && typeof message.job === 'string') {
+        void collect(message).then(respond,()=>respond({error:'page'}));return true;
+      }
       else if (message?.type === 'qingread:frames') respond({frames:embeddedPages()});
-      else if (message?.type === 'qingread:prioritize' && message.job === currentJob) respond({ ids: [...records].sort((a,b) => distance(a[1].element)-distance(b[1].element)).map(([id]) => id) });
+      else if (message?.type === 'qingread:prioritize' && message.job === currentJob) {
+        const context=readContext();respond({ ids: [...records].sort((a,b) => distance(a[1].element,context)-distance(b[1].element,context)).map(([id]) => id) });
+      }
       else if (message?.type === 'qingread:apply') respond(apply(message));
       else if (message?.type === 'qingread:restore') { removeTranslations(); respond({ restored: true }); }
-      else if (message?.type === 'qingread:cancel') { if (currentJob === message.job) { currentJob = null; records.clear(); } respond({ stopped: true }); }
+      else if (message?.type === 'qingread:cancel') { if (currentJob === message.job) { collectionEpoch++;currentJob = null; records.clear(); } respond({ stopped: true }); }
     } catch { respond({ error: 'page' }); }
   });
 })();

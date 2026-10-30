@@ -155,6 +155,7 @@ async function start() {
     job.target = await inject(tab); assertLive(job);
     const batch = await send(job.target, { type: 'qingread:collect', job: job.id, scope: $('scope').value });
     assertLive(job);
+    if (batch?.error === 'changed') throw new DOMException('Page changed during extraction','PageChangedError');
     if (!batch || batch.error || !Array.isArray(batch.items) || batch.items.length > LIMITS.paragraphs) throw new DOMException('Invalid batch','PageReadError');
     if (batch.frames?.length) globalThis.QingReadFrames?.show(batch.frames,job.target);
     if (!batch.items.length) {

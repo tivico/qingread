@@ -42,6 +42,7 @@
       const target = await inject(tab);
       if (task !== job) return;
       const batch = await send(target, {type:'qingread:summary-source', job:crypto.randomUUID(), scope:'page'});
+      if (batch?.error === 'changed') throw new DOMException('Page changed during extraction','PageChangedError');
       if (!Array.isArray(batch?.items)) throw new Error('無法讀取正文，請重新整理網頁後重試。');
       if (batch.reason === 'embedded') throw new Error('課文在內嵌頁面中。請到網頁翻譯頁籤展開「課文沒有翻到？」，開啟課文來源後再摘要。');
       const source = batch.items.map(item => item.text).join('\n\n');
