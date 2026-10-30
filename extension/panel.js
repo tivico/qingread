@@ -7,6 +7,7 @@ let ready = false;
 let availabilityEpoch = 0;
 let glossaryRules = [];
 let siteAccessTarget = null;
+const pendingSiteRequests = new Set();
 async function checkAvailability() {
   const epoch = ++availabilityEpoch, source = $('source').value;
   if ($('engine').value === 'local') {
@@ -53,7 +54,7 @@ async function inject(tab, file = 'content.js') {
   try { result = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: [file] }); }
   catch (cause) {
     const name = QingReadCore.injectionErrorName(cause);
-    siteAccessTarget = null;
+    siteAccessTarget = name==='PageAccessError'?{tabId:tab.id,windowId:tab.windowId}:null;
     if (name === 'PageAccessError') {
       // Only parse the browser's known permission error format; never display its raw URL/query.
       const match = String(cause?.message || '').match(/Cannot access contents of url ["'](https?:\/\/[^"']+)["']/i);
@@ -101,7 +102,7 @@ function showFailure(error, job) {
   const name = /^[A-Za-z]{1,40}$/.test(error.name || '') ? error.name : 'Error';
   const label = pageError ? labels['page-read'] : labels[stage];
   const unknown = !pageError && name === 'Error' && $('engine').value === 'chrome';
-  const hint = pageError ? (error.name === 'PageAccessError' ? (siteAccessTarget ? `請按「允許 ${new URL(siteAccessTarget.origin).hostname}」，在 Chrome 提示中確認；只申請這個網站。` : '請按「允許此網站」，再到 Chrome 工具列的拼圖選單確認允許。') : errorText(error))
+  const hint = pageError ? (error.name === 'PageAccessError' ? (siteAccessTarget?.origin ? `請按「允許 ${new URL(siteAccessTarget.origin).hostname}」，在 Chrome 提示中確認；只申請這個網站。` : 'Chrome 隱藏了目前網址。請直接點工具列清讀圖示，或到拼圖選單確認允許此網站，再重新開始。') : errorText(error))
     : stage.startsWith('engine') ? '按「測試引擎」確認固定句子能否翻譯；若同樣失敗，可在引擎選單改用已配對的本機模型。'
     : '重新整理網頁後重試。';
   status(unknown ? `${label}失敗，尚無法確認原因。` : failure(error),
@@ -109,7 +110,7 @@ function showFailure(error, job) {
 清讀 0.3.8 · ${$('engine').value} · ${$('source').value} → zh-Hant
 診斷：${pageError ? 'page-read' : stage} / ${name}
 ${hint}`);
-  if (error.name === 'PageAccessError') { $('grant-site').textContent = siteAccessTarget ? '允許 '+new URL(siteAccessTarget.origin).hostname : '允許此網站'; $('grant-site').hidden = false; }
+  if (error.name === 'PageAccessError') { $('grant-site').textContent = siteAccessTarget?.origin ? '允許 '+new URL(siteAccessTarget.origin).hostname : '檢查網站存取'; $('grant-site').hidden = false; }
 }
 function failure(error) {
   return ['PageAccessError','PageReadError','PageMissingError','PageRestrictedError','PageChangedError','ExtensionLoadError','PageInjectionError','TimeoutError','AbortError'].includes(error.name) || $('engine').value==='chrome' ? errorText(error) : error.message;
@@ -342,32 +343,53 @@ for (const button of document.querySelectorAll('[data-view]')) {
 }
 
 // Keep this call in the click handler: awaiting a tab lookup first loses user activation.
+function siteTargetFromUrl(value,target) {
+  let url;
+  try{url=new URL(value.trim());}catch{throw new Error('請貼上目前網頁的完整網址，例如 https://網站名稱/。');}
+  if(!/^https?:$/.test(url.protocol)||url.username||url.password||!Number.isInteger(target?.tabId))throw new Error('請使用目前網頁的 http 或 https 網址，不接受含帳號密碼的網址。');
+  return {...target,origin:url.origin,pattern:url.protocol+'//'+url.hostname+'/*'};
+}
 async function requestSiteAccess(target) {
-  if (target && typeof chrome.permissions?.request === 'function') {
+  if (target?.pattern && typeof chrome.permissions?.request === 'function') {
     const granted = await chrome.permissions.request({origins:[target.pattern]});
-    if (!granted) return '尚未允許此網站。請再按授權按鈕，或點工具列的清讀圖示後重試。';
+    if (!granted) return {granted:false,message:'尚未允許此網站。請再按授權按鈕，或點工具列的清讀圖示後重試。'};
     const current = await activeTab();
     if (current.id !== target.tabId || !current.url || new URL(current.url).origin !== target.origin)
       throw new DOMException('Source changed', 'PageChangedError');
-    await inject(current);
-    return '網站授權完成，已確認可以載入讀取程式。請重新按功能的開始按鈕。Chrome 會記住此網站授權，可在外掛的網站存取權撤回。';
+    try{await inject(current);}catch(error){
+      if(error.name==='PageAccessError')throw new DOMException('Permission granted but injection denied','SiteAccessBlockedError');
+      throw error;
+    }
+    pendingSiteRequests.delete(current.id);
+    return {granted:true,message:'網站授權完成，已確認可以載入讀取程式。請重新按功能的開始按鈕。Chrome 會記住此網站授權，可在外掛的網站存取權撤回。'};
   }
   const tab = await activeTab();
+  if(target && tab.id!==target.tabId)throw new DOMException('Source changed','PageChangedError');
+  try{
+    await inject(tab);pendingSiteRequests.delete(tab.id);
+    return {granted:true,message:'網站授權完成，已確認可以載入讀取程式。請重新按功能的開始按鈕。'};
+  }catch(error){if(error.name!=='PageAccessError')throw error;}
   if (typeof chrome.permissions?.addHostAccessRequest !== 'function')
-    return '請在工具列直接點清讀圖示，再按開始；不要只從側邊欄選單開啟。';
-  await chrome.permissions.addHostAccessRequest({tabId:tab.id});
-  return '已送出網站授權請求，尚未取得授權。請到 Chrome 工具列的擴充功能（拼圖）選單允許此網站，再重新開始。';
+    return {granted:false,message:'Chrome 未提供直接網站授權。請直接點工具列清讀圖示後重新開始，或在摘要授權欄貼上目前網址。'};
+  if(!pendingSiteRequests.has(tab.id)){
+    await chrome.permissions.addHostAccessRequest({tabId:tab.id});pendingSiteRequests.add(tab.id);
+  }
+  return {granted:false,message:'已送出網站授權請求，尚未取得授權。請到 Chrome 工具列的擴充功能（拼圖）選單允許此網站，或貼上目前網址直接授權。確認後可按「檢查網站存取」；重複按鈕不會自動核准。'};
 }
 
 $('grant-site').onclick = async () => {
   const button = $('grant-site'); button.disabled = true;
   try {
-    status(await requestSiteAccess(siteAccessTarget), '授權後可按開始翻譯。Chrome 會記住此網站授權，可在外掛的網站存取權撤回。');
+    const result=await requestSiteAccess(siteAccessTarget);
+    status(typeof result==='string'?result:result.message, '授權後可按開始翻譯。Chrome 會記住此網站授權，可在外掛的網站存取權撤回。');
+    if(result?.granted!==true){button.textContent='檢查網站存取';button.hidden=false;}
   } catch (error) {
-    if (error.name?.endsWith('Error') && error.name !== 'Error') showFailure(error,{stage:'page-read'});
+    if(error.name==='SiteAccessBlockedError')status('網站已授權，但 Chrome 仍禁止讀取。請重新整理該網頁；若仍失敗，檢查清讀的網站存取設定，或先用文字翻譯貼上正文。');
+    else if (error.name?.endsWith('Error') && error.name !== 'Error') showFailure(error,{stage:'page-read'});
     else status('Chrome 未完成網站授權。', '請到清讀詳細資料檢查網站存取權，或直接點工具列清讀圖示後重試。');
   } finally { button.disabled = false; }
 };
 
 chrome.tabs.onActivated.addListener(info => {if(Number.isInteger(siteAccessTarget?.windowId) && info.windowId !== siteAccessTarget.windowId)return;siteAccessTarget=null; $('grant-site').hidden=true;});
-chrome.tabs.onUpdated.addListener((id,change) => {if(siteAccessTarget?.tabId===id && (change.status==='loading'||change.url)){siteAccessTarget=null; $('grant-site').hidden=true;}});
+chrome.tabs.onUpdated.addListener((id,change) => {if(change.status==='loading'||change.url)pendingSiteRequests.delete(id);if(siteAccessTarget?.tabId===id && (change.status==='loading'||change.url)){siteAccessTarget=null; $('grant-site').hidden=true;}});
+chrome.tabs.onRemoved?.addListener(id=>pendingSiteRequests.delete(id));

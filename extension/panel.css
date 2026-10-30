@@ -35,3 +35,4 @@ textarea{width:100%;resize:vertical;font-family:inherit;font-size:14px;line-heig
 .panel #summary-output{margin-top:16px;padding:16px;background:#f4faf7;border:1px solid #b8d3c6;border-radius:12px;scroll-margin-top:12px}
 .panel #summary-output h3{margin:0 0 10px;font-size:16px;color:var(--ink)}
 .panel #summary-result{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;color:var(--ink)}
+#summary-site-url{box-sizing:border-box;width:100%;padding:10px;border:1px solid #d4dfd5;border-radius:8px;font:inherit}

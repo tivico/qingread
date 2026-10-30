@@ -1390,6 +1390,86 @@ test('summary permission fallback handles hidden URLs and clears on navigation',
   assert.equal(await page.locator('#summary-grant').isVisible(),false);
  }finally{await page.close();}
 });
+test('hidden-URL summary can grant only the pasted NTTU host and then read the article',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      const url='https://aa.nttu.edu.tw/p/406-1002-179272,r1386.php?Lang=zh-tw';
+      chrome.tabs.query=async()=>[{id:7,...(harness.granted?{url}:{})}];
+      chrome.scripting.executeScript=async()=>{if(!harness.granted)throw new Error('Cannot access contents of the page. Extension manifest must request permission to access the respective host.');return [{documentId:'article'}];};
+      chrome.permissions={request:async options=>{harness.permission=options;harness.gesture=navigator.userActivation.isActive;harness.granted=true;return true;}};
+      QingReadLocal.request=async()=>{harness.summaryRequests=(harness.summaryRequests||0)+1;return {text:'公告摘要。'};};
+    });
+    await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
+    await page.waitForFunction(()=>!document.querySelector('#summary-site-entry').hidden);
+    assert.equal(await page.evaluate(()=>harness.summaryRequests||0),0);
+    await page.locator('#summary-site-url').fill('https://aa.nttu.edu.tw/p/406-1002-179272,r1386.php?Lang=zh-tw');
+    assert.equal(await page.locator('#summary-grant').textContent(),'允許 aa.nttu.edu.tw');
+    await page.locator('#summary-grant').click();
+    await page.waitForFunction(()=>document.querySelector('#summary-status').textContent.includes('網站授權完成'));
+    assert.deepEqual(await page.evaluate(()=>harness.permission),{origins:['https://aa.nttu.edu.tw/*']});
+    assert.equal(await page.evaluate(()=>harness.gesture),true);
+    assert.equal(await page.locator('#summary-grant').isVisible(),false);
+    assert.equal(await page.locator('#summary-site-url').inputValue(),'');
+    await page.locator('#summary-start').click();await page.waitForFunction(()=>document.querySelector('#summary-result').textContent==='公告摘要。');
+  }finally{await page.close();}
+});
+
+test('pending site requests are not repeated and are verified after native permission changes',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      chrome.tabs.query=async()=>[{id:7}];
+      chrome.scripting.executeScript=async()=>{if(!harness.granted)throw new Error('Cannot access contents of the page.');return [{documentId:'article'}];};
+      chrome.permissions={addHostAccessRequest:async()=>{harness.requests=(harness.requests||0)+1;}};
+    });
+    await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
+    await page.waitForFunction(()=>!document.querySelector('#summary-grant').hidden);
+    for(let i=0;i<3;i++)await page.locator('#summary-grant').click();
+    assert.equal(await page.evaluate(()=>harness.requests),1);
+    assert.match(await page.locator('#summary-status').textContent(),/尚未取得授權/);
+    await page.evaluate(()=>{harness.granted=true;});
+    await page.locator('#summary-grant').click();
+    await page.waitForFunction(()=>document.querySelector('#summary-status').textContent.includes('網站授權完成'));
+    assert.equal(await page.locator('#summary-grant').isVisible(),false);
+  }finally{await page.close();}
+});
+
+test('a granted host that still rejects injection gives a terminal action instead of another grant loop',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      chrome.scripting.executeScript=async()=>{throw new Error('Cannot access contents of url "https://article.test/"');};
+      chrome.permissions={request:async()=>true};
+    });
+    await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
+    await page.waitForFunction(()=>!document.querySelector('#summary-grant').hidden);
+    await page.locator('#summary-grant').click();
+    await page.waitForFunction(()=>document.querySelector('#summary-status').textContent.includes('網站已授權'));
+    assert.equal(await page.locator('#summary-grant').isVisible(),false);
+    assert.match(await page.locator('#summary-status').textContent(),/重新整理.*網站存取設定/);
+  }finally{await page.close();}
+});
+
+test('pasted permission URLs reject credentials and never inject into a different active host',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      chrome.tabs.query=async()=>[{id:7,...(harness.granted?{url:'https://different.test/'}:{})}];
+      chrome.scripting.executeScript=async()=>{harness.injectCalls=(harness.injectCalls||0)+1;throw new Error('Cannot access contents of the page.');};
+      chrome.permissions={request:async()=>{harness.permissions=(harness.permissions||0)+1;harness.granted=true;return true;}};
+    });
+    await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
+    await page.waitForFunction(()=>!document.querySelector('#summary-site-entry').hidden);
+    await page.locator('#summary-site-url').fill('https://user:secret@aa.nttu.edu.tw/');await page.locator('#summary-grant').click();
+    assert.equal(await page.evaluate(()=>harness.permissions||0),0);
+    assert.match(await page.locator('#summary-status').textContent(),/不接受含帳號密碼/);
+    await page.locator('#summary-site-url').fill('https://aa.nttu.edu.tw/');await page.locator('#summary-grant').click();
+    await page.waitForFunction(()=>document.querySelector('#summary-status').textContent.includes('頁面正在切換'));
+    assert.equal(await page.evaluate(()=>harness.injectCalls),1,'After granting a pasted host, origin must be checked before injection');
+  }finally{await page.close();}
+});
+
 test('summary script loading error never asks for more site permissions',async()=>{
  const page=await panelFixture();try{
   await page.evaluate(()=>{chrome.scripting.executeScript=async()=>{throw new Error('Could not load file: content.js');};});

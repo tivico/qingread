@@ -23,6 +23,7 @@
   }
   function clear() {
     accessTarget = null; el('summary-grant').hidden = true;
+    el('summary-site-entry').hidden=true;el('summary-site-url').value='';
     stop('頁面已變更，請重新整理摘要。'); sourceTabId = null; sourceWindowId = null;
     el('summary-result').textContent = ''; el('summary-copy').disabled = true;
     el('summary-output').hidden = true;
@@ -31,6 +32,7 @@
     if (task) return;
     const job = {controller: new AbortController(), tabId: null}; task = job;
     accessTarget = null; el('summary-grant').hidden = true;
+    el('summary-site-entry').hidden=true;el('summary-site-url').value='';
     el('summary-start').disabled = true; el('summary-stop').disabled = false;
     el('summary-copy').disabled = true; el('summary-result').textContent = '';
     el('summary-output').hidden = true;
@@ -86,7 +88,8 @@
         if(job.hasText)el('summary-status').textContent+=' 下方僅為已收到的部分摘要，尚未完成。';
         if (error.name === 'PageAccessError') {
           accessTarget = error.accessTarget;
-          el('summary-grant').textContent = accessTarget ? '允許 ' + new URL(accessTarget.origin).hostname : '允許此網站';
+          el('summary-grant').textContent = accessTarget?.origin ? '允許 ' + new URL(accessTarget.origin).hostname : '檢查網站存取';
+          el('summary-site-entry').hidden=Boolean(accessTarget?.origin);
           el('summary-grant').hidden = false;
           el('summary-status').textContent += ' 請按下方授權按鈕，確認後重新整理摘要。';
         }
@@ -101,12 +104,26 @@
     const target = accessTarget, source = sourceTabId;
     el('summary-grant').disabled = true;
     try {
-      const message = await requestSiteAccess(target);
-      if (source === sourceTabId && target === accessTarget) el('summary-status').textContent = message;
+      const requested=el('summary-site-url').value.trim()?siteTargetFromUrl(el('summary-site-url').value,target):target;
+      const result = await requestSiteAccess(requested);
+      if (source === sourceTabId && target === accessTarget) {
+        el('summary-status').textContent=typeof result==='string'?result:result.message;
+        if(result?.granted){el('summary-grant').hidden=true;el('summary-site-entry').hidden=true;el('summary-site-url').value='';}
+        else el('summary-grant').textContent='檢查網站存取';
+      }
     } catch (error) {
-      if (source === sourceTabId && target === accessTarget) el('summary-status').textContent = error.name === 'PageChangedError' ? QingReadCore.errorText(error) : 'Chrome 未完成網站授權。請點工具列清讀圖示後重試。';
+      if (source === sourceTabId && target === accessTarget) {
+        if(error.name==='SiteAccessBlockedError'){
+          el('summary-status').textContent='網站已授權，但 Chrome 仍禁止讀取。請先重新整理該網頁；若仍失敗，檢查清讀的網站存取設定，或使用「文字翻譯」貼上正文。';
+          el('summary-grant').hidden=true;el('summary-site-entry').hidden=true;
+        }else el('summary-status').textContent=error.name==='PageChangedError'?QingReadCore.errorText(error):error.name==='Error'?error.message:'Chrome 未完成網站授權。請點工具列清讀圖示後重試。';
+      }
     } finally { el('summary-grant').disabled = false; }
   };
+  el('summary-site-url').addEventListener('input',()=>{
+    try{const target=siteTargetFromUrl(el('summary-site-url').value,accessTarget);el('summary-grant').textContent='允許 '+new URL(target.origin).hostname;}
+    catch{el('summary-grant').textContent='檢查網站存取';}
+  });
   el('summary-copy').onclick = async () => {
     try { await navigator.clipboard.writeText(el('summary-status').textContent + '\n\n' + el('summary-result').textContent); }
     catch { el('summary-status').textContent = '複製未成功，可直接反白摘要文字複製。'; }
