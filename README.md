@@ -1,0 +1,766 @@
+# 清讀 · 本機繁中翻譯
+
+版本 **0.3.8，功能預覽版**。從只有 Chrome 語言包的網頁翻譯，擴充為「Chrome 外掛＋每台電腦自己的本機助手」。不需要付費翻譯 API；需要首次下載、磁碟、記憶體與運算時間。目前不是已完成所有網站及親友電腦驗收的正式產品。
+
+## 目前開發狀態與紀錄（2026-10-30）
+
+本機 Git 已建立於 `main`，首筆提交保存目前程式與文件基準；尚無遠端或雲端備份。每批修改需更新 [CHANGELOG.md](CHANGELOG.md) 的變更與驗證，以及 [docs/PROGRESS.md](docs/PROGRESS.md) 的六項優化進度、資料流、排錯與維護操作。下方較早章節保留歷史背景，以本節及進度文件為目前行為依據。
+
+本輪完成本機互動工作取消與階段回報、有模型內容指紋的有限快取，以及長文「接續翻譯」。介面與助手單筆互動工作預算為 180 秒，包含排隊。停止會通知助手關閉該筆 Ollama 連線，清理及釋放通道後再確認；無法確認時如實提示。PDF 相容端點與語音辨識仍使用既有生命週期，六項清單的第 4～6 項尚待處理。
+
+快取只留記憶體，最多 32 筆、512,000 UTF-8 bytes、10 分鐘；模型內容、原文、語言、指令或推論設定不同不會重用。長文停止或失敗後，可按「接續翻譯」從未完成區塊繼續；原文、設定及模型身分改變需重翻全文。「翻譯文字」仍從頭開始，「清空」會移除接續資料。
+
+本輪實測使用人工原文與 Gemma 3 4B：長文取消確認約 0.015 秒；後續新短文約 3.375 秒；相同短文快取約 0.157 秒。這是單次隔離助手測量，未修改正式設定，也不代表硬體完全停止運算的時間。36 項 JavaScript、43 項 Python、85 項瀏覽器測試通過。
+
+啟用新版需**重新載入外掛、重開側欄，並在沒有重要工作時重新啟動本專案的 `companion/start.cmd`**。`/health` 的 `inference_jobs: true` 可確認助手已載入新版功能；不要刪除個人配對設定。新檔案 `companion/inference.py` 負責工作、期限與連線取消，`app.py/start_inference` 負責內容驗證、模型身分與快取，`local-client.js/runInference` 負責建立／查詢／取消，`text.js` 負責部分結果與接續。完整排錯、改參數範例與 Git 指令見進度文件。
+
+## 影片字幕舒適閱讀（2026-10-29）
+
+本輪優先處理使用者回報的 YouTube 現有字幕閃動。原本 `media-content.js/readCue()` 每偵測到原文改變就移除整個翻譯框；YouTube 自動字幕逐字補上、把上一行捲走時，會反覆清空並重建畫面。現在重用同一個字幕框，固定底部位置與基本閱讀高度，在新譯文可用時整段替換，沒有淡入淡出或逐字動畫。
+
+### 如何使用新版
+
+1. Chrome 的擴充功能管理頁重新載入清讀，再**重新整理 YouTube 影片頁**並重開側欄。只重開側欄不會替換已注入舊頁面的程式。
+2. 保持 YouTube 原文字幕開啟；清讀選「讀取影片現有字幕」，確認來源語言，再按「開始字幕」。依使用回饋改為預設雙語對照：上方小字原文、下方較大繁中，一起整段更新；只想看繁中時，在開始前取消勾選「同時顯示原文」。此勾選目前只保留於本次側欄，重新開啟側欄預設恢復雙語，不儲存成永久偏好。
+3. YouTube 原字幕在清讀譯文出現期間暫時隱藏，但仍保留文字節點供讀取；停止、快轉、影片移除或譯文逾期時恢復原字幕。其他網站的原生字幕不自動隱藏。
+4. 暫停影片會保留現有譯文，方便閱讀；快轉、載入另一段影片與停止會立即清除，並拒絕舊播放位置的回應。
+
+### 更新節奏、資料流與檔案角色
+
+- `extension/caption-state.js/createCueBuffer()`：原文穩定 650 毫秒後才送翻譯；持續補字或有至少三個空白分隔字重疊的捲動字幕，沿用同一個約 2 秒等待上限。模型忙碌時只保留最新候選句，不累積無限佇列。送出後重新計算下一批的等待時間；無關新句、空白與快轉會重設等待。
+- `extension/video.js/captions()`：每 250 毫秒讀原字幕，讀取與翻譯的忙碌狀態分開，因此翻譯中仍能追蹤最新句子。每次開始建立自己的 32 筆字幕翻譯快取，只存在記憶體，不跨工作或模型重用；停止後不保留歷史。
+- `extension/media-content.js/refreshDisplay()`：正常換句至少保留約 2 秒閱讀時間；原文短暫空白有 1.2 秒緩衝；已不相關的舊字幕最遲於顯示約 6 秒後清除。暫停現有字幕模式時保留閱讀內容；語音模式仍有 8 秒上限。
+- `matchesCurrent()`：相同播放時間線中，允許 3 秒內觀察到的原文繼續長字，或至少 3 個以空白分隔的字在「舊句尾端／新句開頭」重疊。這是針對 YouTube 英文捲動字幕的保守啟發式判斷，不是語意理解；不相關內容、過期重疊或快轉前的回應不接受。無空白分詞的其他語言不套用三字重疊容錯。
+- `extension/panel.html`：載入新的字幕緩衝程式、提供原文顯示選項及閱讀提示；執行期間停用字幕來源與顯示選項，停止後可修改。
+
+雙語偏好的流程：`panel.html` 的 `video-bilingual` 預設勾選 → `video.js` 開始時讀取並傳送 `bilingual` → `media-content.js` 顯示小字原文。若小字沒出現，先停止字幕並確認此勾選，再重新開始；若要更改預設，調整該輸入欄位的 `checked` 屬性並同步提示文字。維護時需驗證預設雙語與手動取消勾選兩條路徑，既有瀏覽器測試已涵蓋。
+
+```text
+YouTube 原字幕文字節點
+→ media-content.js / qingread:media-read（原文、版本、播放時間線）
+→ caption-state.js（等待穩定、保留最新候選句）
+→ video.js（本次工作快取 → 所選 Chrome／本機翻譯器 → 詞彙表）
+→ qingread:media-show
+→ media-content.js（驗證仍相關 → 保留閱讀時間 → 同一字幕框替換文字）
+```
+
+取捨：較穩定的閱讀會增加少量延遲；快速對話或引擎太慢時，可能略過中間結果，並非逐句完整逐字稿。這次沒有加速模型、改動語音辨識切段，或實作前述全專案效能優化。文字只供本機引擎處理，字幕快取與版本歷史均有上限，正常使用不寫字幕到磁碟。
+
+### 驗證與維護
+
+實際開啟使用者提供的 [YouTube 影片](https://www.youtube.com/watch?v=NbHFRA8uMDY&t=184s)，觀察英文自動字幕。3:11–3:22 約 11 秒內捕捉到 22 次原文變動，包含補字與首行捲出。將字詞替換為代碼，保留時序與重疊關係，存成 `tests/fixtures/youtube-caption-timing.json`，不保存影片逐字稿。測試後還原測試瀏覽器原先的字幕語言。
+
+重播使用正式緩衝與顯示程式，分別模擬 350／1,300 毫秒翻譯延遲：兩種情況均提交 5 次翻譯、顯示 5 段結果，顯示後沒有中途空白或重建字幕框，各段切換間隔至少 2 秒。結果見 `test-results/youtube-caption-timing-replay.json`。這是**實際原字幕節奏＋模擬翻譯的回播**，不是新版外掛與真實翻譯引擎在 YouTube 上的完整端到端驗收；真實引擎延遲、語意品質、廣告切換及原生 video 全螢幕仍需實測。HTML 影片播放器容器的全螢幕移動已模擬驗證，原生 video 全螢幕無法保證顯示網頁疊字。
+
+舒適閱讀初版通過 JavaScript 單元測試 26 項、瀏覽器流程 76 項；前者含 `tests/caption-state.test.cjs` 的穩定等待、持續補字上限與最新候選句，後者含 `tests/video-comfort.test.cjs` 的停留時間、短暫空白、暫停、快轉、過期結果、雙語模式及實際節奏回播。後續跟不上字幕的修正見下一節。本輪未改 Python 助手，未重跑 Python 測試。可用以下指令重驗：
+
+```powershell
+npm.cmd test
+$env:CHROME_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+npm.cmd run test:browser
+```
+
+排錯順序：先確認已重載外掛且重整影片 → 原字幕確實開啟且語言與清讀選單一致 → 看側欄等待秒數、最近翻譯耗時與過期計數 → 暫停後測是否能出現譯文 → 若暫停可翻但播放常略過，優先檢查引擎速度，再跑上述回播測試。要暫時恢復原字幕，按停止；若舊注入程式沒有回應，重新整理影片頁即可清除疊字與隱藏樣式。
+
+維護例：若想讓每段多停留半秒，改 `media-content.js` 的 `MIN_HOLD` 為 2500，並同步畫面提示、測試停留門檻及本節說明，再重播兩種延遲案例。延長停留會增加略過中間句子的機會，不應只調數字而不看實際閱讀與同步效果。若要調原文穩定等待，修改 `caption-state.js/TIMING`；不能移除 `timelineVersion` 或過期檢查來強行讓舊譯文通過。
+
+### 快速字幕跟不上修正（2026-10-30）
+
+使用者選擇「保持流暢播放，略過跟不上的句子」，因此不自動暫停、快轉或改播放速度。保留雙語與至少 2 秒閱讀時間；過期結果仍會拒收，不能用放寬時間線檢查來掩蓋延遲。
+
+確認的程式問題：原先 `createCueBuffer()` 只認得句尾補字；YouTube 把第一行捲走時會重設 `firstSeen`，讓快速字幕一直重新等。針對 [回報影片](https://www.youtube.com/watch?v=sL5hPovH1vU) 的英文自動字幕，在 74.94–91.51 秒觀察到 47 次文字變動，匿名化為 `tests/fixtures/youtube-fast-caption-timing.json`。以每 250 毫秒讀取的同一份資料比較，舊緩衝器到 12,750 毫秒才送第一筆，新版為 2,000 毫秒；這是送出前的等待，不是模型翻譯時間。原文的逐字新增與至少三字的首尾重疊現在都會沿用等待預算；只保留最新候選，不重播中間積壓的句子。
+
+狀態資料流也補齊：`media-content.js/readCue()` 回傳 `display.visible/current/pending`，分別代表字幕框存在、目前譯文仍與原文相關、以及結果正在等閱讀停留時間 → `video.js/captions()` 每 250 毫秒更新 → `captionStatus()` 顯示等待／追趕／舒適閱讀狀態。收到翻譯結果不代表已經顯示，不能只靠 `media-show.applied` 宣告成功。等待超過 2 秒會顯示已等幾秒，並附最近一筆翻譯流程耗時與本次工作拒收的過期結果數；耗時含快取及訊息傳送，過期計數不等於所有漏掉的句子，也不包含候選緩衝與畫面等待階段略過的句子。這些資料只存在記憶體，停止重開歸零。
+
+回播兩支影片並模擬 350／1,300 毫秒翻譯延遲，新影片兩種情況各送出及顯示 8 段結果，沒有顯示後空白或字幕框重建，每段實際文字停留至少 2 秒。報告：`test-results/youtube-fast-caption-timing-replay.json`。測試用 DOM 文字變動事件記錄實際更新時間，避免 100 毫秒取樣把真正的 2 秒停留誤算成 1.9 秒。單元測試覆蓋捲動等待上限、短重疊、快轉與實際節奏；瀏覽器測試覆蓋慢引擎提示、尚未顯示的結果、字幕消失、過期計數與停止狀態。這次仍是實際節奏加模擬翻譯，沒有量測使用者正在使用的引擎耗時或完成真實模型端到端驗收。
+
+維護判斷例：若側欄長時間顯示「正在等翻譯（N 秒）」，瓶頸在已送出的翻譯工作；若原文一直捲動卻遲遲不進入翻譯，檢查 `caption-state.js/continues()` 與 `firstSeen`，用上述 fixture 重播。`TIMING.maxWait` 控制引擎空閒時的送出等待上限，`media-content.js/MIN_HOLD` 控制已顯示字幕的閱讀時間，兩者用途不同。調整前者後應跑 `npm.cmd test` 與瀏覽器回播，確認首筆不再飢餓、又不會每補一字就送一次請求；不要改短後者來假裝模型變快。更新仍需重新載入外掛、重新整理影片並重開側欄。
+
+本次最終驗證：`npm.cmd test` 的 28 項單元測試，以及指定 Chrome 執行 `npm.cmd run test:browser` 的 78 項瀏覽器測試全部通過。Python 助手未修改，未重跑其測試。
+
+## 這台電腦目前的模型：Google Gemma 3 4B（2026-10-28）
+
+使用者同意下載非中國來源的小型模型後，實際比較 [Google Gemma 3 4B](https://ollama.com/library/gemma3:4b) 與 [IBM Granite 4 3B](https://huggingface.co/ibm-granite/granite-4.0-micro)，並將執行中助手改選 `gemma3:4b`。未下載 Qwen 或其他中國來源模型。兩個新模型都保留在本機，原本 Breeze2 也保留；這是此電腦的模型設定，不是安裝包的新預設。Gemma 約占 3.35 GB、Granite 約 2.10 GB。
+
+### 實測、選擇理由與限制
+
+同一台 i7-14700、CPU 推論、同一篇 3,647 字元 Claude Code 公開文章，使用相同正式摘要流程。首字是第一筆可見文字，完成是收到完整結果：
+
+| 模型 | 首字 | 完成 | 判讀 |
+| --- | ---: | ---: | --- |
+| Breeze2 8B Q8 | 115.58 秒 | 160.61 秒 | 原模型基準 |
+| IBM Granite 4 3B Q4 | 41.64 秒 | 48.42 秒 | 額外事實測試將 11 月 9 日誤寫為 9 月 9 日，不選為目前模型 |
+| Google Gemma 3 4B Q4 | 26.84 秒 | 32.67 秒 | 本次選用，文章摘要有總覽與三點，未達輸出上限 |
+
+新模型各自在測前卸載其執行實例，計時包含重新載入；Breeze2 舊基準模型已載入但該原文尚未快取，因此不是完全相同的冷啟動條件。Gemma 此案例完成時間約快 5 倍，不能外推成所有文章都會如此。Gemma 額外測試保留了日期、費用、時間與「不刪除現有預約」；另一句翻譯將 optional 譯為「額外」，精確度仍有限，不能以少量案例宣稱品質全面通過。尚未以此模型驗收長篇 PDF、多語言或 OCR。
+
+結果及完整輸出：`test-results/model-comparison.json`；舊基準保留在 `test-results/summary-performance.json`。測試資料是公開文章與人工句子，不含私人內容。摘要及模型推論仍只交給本機 Ollama；下載模型會連線模型儲存庫。
+
+切換後以真實 Chromium 載入外掛，驗證授權、讀取正文、呼叫執行中的助手與非空結果顯示；暖機後首字 0.905 秒、完成 8.074 秒，已檢視結果截圖。最新記錄為 `test-results/extension-smoke.json` 與 `summary-real-extension.png`（會覆寫前次外掛實測）。第一次執行因「頁面已變更」取消，加入測試頁籤事件診斷後重跑通過；取消原因尚未定位，沒有為了測試通過而移除正式流程的切頁保護。`tests/extension-smoke.cjs` 現在在失敗報告中保留受控測試頁籤的啟用／載入事件，方便下次縮小範圍。此驗證使用獨立瀏覽器設定檔，未代替使用者日常 Chrome 側欄及其他功能的全面驗收。
+
+### 操作、資料流與維護
+
+1. 外掛「PDF 與助手設定」讀取 `/health`，目前 `selected_model` 應為 `gemma3:4b`。如果畫面仍顯示舊值，重新整理設定頁；切換模型本身不需重載外掛或重新配對。
+2. 選模型並按「使用這個模型」→ `extension/workspace.js` 經 `local-client.js` 傳送已驗證的 `POST /settings` → `companion/app.py` 的 `ensure_model` 確認模型存在 → 更新記憶體與 `companion/data/config.json` 的 `model`。勿公開該檔案，其中也有配對憑證。
+3. 摘要 `POST /summarize` → `stream_summary` 讀目前模型 → 本機 Ollama → 繁中轉換與逐步回傳 → `extension/summary.js` 顯示。模型選擇也影響本機文字翻譯、解釋與 PDF 翻譯，不改變 Chrome 語言包或語音辨識模型。切換前應先完成進行中的工作。
+4. **變慢時**：先確認設定頁的模型，再執行 `ollama ps` 查看實際載入模型及 CPU／GPU；新文章需先處理原文，這台電腦仍可能等數十秒。相同文章的助手快取約 0.11 秒不代表新文章速度。**數字／否定句錯誤時**：對照原文，必要時在同一下拉選單切回 Breeze2，原模型不需重裝。
+5. **自行比較另一個模型**：先確認來源符合偏好，下載後用下列指令指定模型與測試文字。`tests/benchmark_models.py` 透過暫存助手實例呼叫正式 `stream_summary`／`translate`，記錄首字、完成時間與內容，最後驗證相同文章的快取；不更動正在使用的模型設定，但會使用同一 Ollama 的運算資源，應在助手空閒時執行。人工檢查日期、金額、否定與限制，再決定是否到設定頁切換，不只比較秒數。
+
+```powershell
+.\companion\.venv\Scripts\python.exe tests/benchmark_models.py gemma3:4b --source test-results/summary-benchmark-source.txt --output test-results/gemma-recheck.json
+```
+
+測試文字必須為 UTF-8、1 至 6,000 字元；可將 `--source` 換成自行準備的公開測試文章。效能輸出檔不包含在發行 ZIP 內，打包後的使用者需自行準備來源檔。本節為後續模型選擇，以下 0.3.8 開發紀錄中的「保留 Breeze2」描述的是切換前狀態。
+
+## 0.3.8：摘要等待時間與逐步顯示（2026-10-28）
+
+使用者回報讀取 3,647 字元後，107 秒仍沒有摘要。現場 /api/ps 顯示 Breeze2 8B Q8 的 size_vram=0，硬體是 i7-14700／Intel UHD 770；目前為 CPU 推論。這是可觀察到的模型運算限制，不能把逐步顯示當成模型已加速。使用者明確要求不採中國來源模型，本輪未下載新模型、未切換既有模型；保留 Breeze2。
+
+### 修改與資料流
+
+- **app.py/summary_messages**：摘要指定一句總覽、三個重點、目標 200 個中文字，在文章資料後重申任務，降低 Breeze2 續寫／大量重述原文的情況。這是提示目標，不是假稱模型一定遵守的字數限制。
+- **app.py/chat、stream_summary**：摘要專用生成上限 512 tokens（模型文字單位），一般翻譯仍為 4,096；輸入仍取目前可見原文前 6,000 字元、模型上下文仍為 8,192，不暗中截短原文。達生成上限時標示部分摘要，不誤報完整成功。
+- **app.py/local_stream、Handler.send_summary**：已驗證憑證的 POST /summarize 收到 Accept: application/x-ndjson 時，以一行一筆 JSON 逐步送出文字。Ollama → 本機助手繁中轉換 → 進度事件 → 前端；沒有送到遠端。舊客戶端不帶這個標頭時仍回完整 JSON。
+- **local-client.js/request**：串流解析保留跨封包 UTF-8 字元，只有明確 done 才算完成；中途斷線或錯誤保留「未完成」狀態。summary.js 用 textContent 立即顯示收到的部分文字，完成前停用複製，停止或切頁後忽略晚到更新。
+- **記憶體快取**：相同模型名稱與相同原文雜湊，可在 10 分鐘內重用完整結果；最多保留 8 筆，不寫磁碟。截斷／失敗／中斷結果不快取，文章變更或模型名稱變更不會命中。助手重啟清除全部；有效期限是重用期限，不保證每筆在第 10 分鐘立即從記憶體移除。
+- **忙碌處理**：新串流摘要若模型已被助手其他工作占用，立即回 429，避免另排 20 秒。使用者停止前端後，助手在下一次寫入偵測斷線並關閉上游；模型讀原文階段可能繼續到下一筆輸出才察覺，不能宣稱停止鈕已即刻釋放所有運算。
+
+### 驗證與效能判讀
+
+74 項 Node／瀏覽器測試與 27 項 Python 測試通過（101 項）；含分段中文字、未完成串流、達輸出上限、停止後晚到結果、模型鎖釋放、快取隔離／過期／容量，以及真實 HTTP 在模型完成前送出進度。這些人工測試不能代替真實模型速度或品質檢查。
+
+實測使用 tests/extension-smoke.cjs 的 CAPTURE_SUMMARY_SOURCE 擷取同一公開 Claude Code 頁面，原文 3,647 字元。第一次僅縮短提示與輸出預算的試驗，首字 120.92 秒、總計 206.59 秒且輸出達上限，證明單改輸出上限並不足夠；已再調整提示，最終量測見 test-results/summary-performance.json、summary-performance-output.txt。不可將暖機、Ollama 提示快取或助手摘要快取結果當成首次新文章效能。 最終 Breeze2 同頁量測：首字 115.58 秒、完整 160.61 秒、重複 0.12 秒；完整輸出 351 字元，沒有達輸出上限。Ollama 回報原文處理 115.12 秒、生成 45.08 秒，首輪延遲仍未根本解決。200 字是提示目標，模型實測未嚴格遵守；三個重點有顯示，仍需對照原文核實。 部署後真實外掛同頁暖機驗證：首字 0.719 秒、完整 46.057 秒，串流結果有顯示；這次受 Ollama 同一原文提示快取影響，不代表新頁面也能在一秒內出字。記錄於 test-results/extension-smoke.json，畫面為 summary-real-extension.png。
+
+### 排查與修改範例
+
+1. **一直顯示讀取原文**：執行 `ollama ps` 確認 CPU／GPU 使用情況，查 /api/ps；大型模型在 CPU 上處理新長文仍可能很慢。模型還沒產生內容時，串流也無法憑空顯示摘要。
+2. **已有部分文字但停住**：先看是否達輸出上限或連線中斷；部分內容不可當全文完成。若前端仍空白，檢查 /summarize 的 Content-Type 是否 application/x-ndjson，確認助手和外掛都是 0.3.8。
+3. **重按仍運算**：核對原文是否改變、模型是否更換、上次是否截斷／失敗，或助手是否重啟／超過 10 分鐘。只快取成功完整結果，不能為了速度沿用不完整內容。
+4. **回復**：可重啟助手清除記憶體快取；舊版客戶端仍可使用 /summarize 完整 JSON。不要為了加速關閉憑證驗證或偷偷把文章改送雲端。
+5. **修改範例**：若希望產生五個重點，同步修改 summary_messages 的 system 與 user 提示、panel.html 說明，評估 512 tokens 是否足夠；補「達上限不能報完整完成」測試並以相同原文重測首字與總時間。改模型前需先確認來源符合使用者要求，保留原模型，並以重要數字、限制與否定句驗證品質。
+
+串流格式依 [Ollama Streaming](https://docs.ollama.com/api/streaming)，CPU／GPU 判讀依 [Ollama FAQ](https://docs.ollama.com/faq)。
+
+## 0.3.7：按鈕配對（2026-10-28）
+
+**操作**：啟動 companion/start.cmd → 在外掛「PDF 與助手設定」按「連接本機助手」→ 若 Chrome 詢問本機連線權限，允許一次 → 核對網頁與 Windows 確認視窗的六位數 → 在助手視窗按「是」。六位數只供核對，不必輸入或複製；按「否」拒絕。原本貼配對碼的方法收在「手動配對（備用）」。
+
+這次選擇改善確認操作，沒有改成永久記住電腦。憑證仍只存在 Chrome storage.session，瀏覽器重啟、外掛重載或更新後要再按連接。助手需先啟動；Chrome 不能僅靠這個 HTTP 按鈕啟動 Windows 程式。內容仍交給本機模型，網站讀取權限另外處理。
+
+### 實作、信任邊界與資料流
+
+1. **extension/workspace.html、workspace.js**：新增連接、取消、就地狀態與手動備用區。點擊當下向 Chrome 要求 127.0.0.1 的可選權限；等待期間停用重複配對按鈕。取消或關閉頁面會撤回要求；關閉頁面若來不及送出撤回，助手會自行逾時。
+2. **extension/local-client.js/connect**：瀏覽器產生 32 bytes 隨機 nonce（一次請求用的秘密，避免其他頁面領走結果），POST /pair/start 後每 750ms POST /pair/status。獲准才驗證 /health 並保存憑證。nonce 與 request id 不放 URL、畫面、文件或日誌；畫面只顯示獨立六位核對數字。
+3. **companion/app.py**：只有 /pair/start、/pair/status、/pair/cancel 這三條配對路由可在尚未有憑證時使用，仍要求正確 loopback Host 與 chrome-extension:// 的 Origin；一般網站、缺少 Origin、錯誤格式都拒絕。其他 API 沿用原本的驗證。配對狀態同時綁定發起外掛來源、隨機 request id 和 nonce。
+4. **companion/pairing.py/Pairing**：記憶體中只保留一個要求；同時僅一個確認視窗，開始要求至少間隔 10 秒。確認視窗最多 90 秒，整個領取要求 120 秒；成功結果只能領取一次。明確拒絕、取消或逾時都不交付憑證。重啟助手即清除未完成要求。
+5. **pairing.py/confirm_on_desktop**：獨立 Python 子程序顯示 Windows 原生「是／否」對話框，預設「否」。取消時終止這個對話框子程序，正常關閉助手也撤回；子程序本身另外設 90 秒期限，避免父程序被強制關閉後視窗永久留著。未支援 Windows 桌面或視窗建立失敗時回報手動配對提示。
+
+不能把「來源像 Chrome 外掛」當成信任保證，因此必須由本機確認視窗批准並核對數字，不能開放任何網站直接索取 config.json 的 token。這次保留現有助手憑證與配對機制，沒有另建永久授權名單；已取得的憑證權限等同既有手動配對。
+
+### 驗證與限制
+
+71 項 Node／瀏覽器測試、21 項 Python 測試通過，共 92 項。新增涵蓋：允許前不保存憑證、拒絕、取消、逾時、重複點擊、舊助手、Chrome 拒絕連線、錯誤 Origin／Host、錯誤 nonce、一次性領取，以及桌面確認失敗。單元測試以受控 callback 模擬使用者選擇；不自動點選真實授權視窗。
+
+真實 Chromium 外掛與執行中的本機助手測試，已收到原生確認的 approved 回應並完成 local-client.connect（含 /health 驗證與 session 儲存），當時測試預設期待取消而判定斷言失敗，這是測試假設不符實際選擇；已修正腳本，明確區分使用者允許與自動取消。後續真實取消測試通過，未保存憑證，見 test-results/pairing-smoke.json。工作室等待畫面已檢視 test-results/pairing-pending.png。尚未在其他 Windows 電腦、非互動式登入或非 Windows 系統驗收。
+
+```powershell
+$env:CHROME_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+node --test tests/core.test.cjs tests/browser.test.cjs
+.\companion\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+# 真實外掛測試改用 Playwright 的完整 Chromium，助手需先啟動。
+Remove-Item Env:CHROME_PATH -ErrorAction SilentlyContinue
+node tests/pairing-smoke.cjs
+```
+
+pairing-smoke 只用獨立瀏覽器設定檔，不讀取既有配對碼，也不自動按原生確認的「是」。若人沒有允許，30 秒後測試自行取消；可用 PAIR_CANCEL_MS 環境變數縮短等候。它驗證真實擴充功能來源、配對 HTTP 與 client，不涵蓋人工點選 Chrome 持續主機授權視窗；UI 按鈕與權限拒絕另有瀏覽器流程測試。
+
+### 排查、回復與如何修改
+
+- **顯示助手未啟動**：執行 companion/start.cmd，再連接；不要先刪模型或資料。已開著仍回舊版提示時，先確認 /health 為 0.3.7，停止舊程序再啟動新版，僅更新磁碟檔案不會更新執行中的服務。
+- **看不到確認視窗**：檢查 Windows 工作列是否有「清讀 · 允許本機連線」。視窗最長 90 秒；不可互動的桌面／未支援系統請用手動配對。未收到使用者允許，不應有 storage.session.companionToken 新增。
+- **另一個確認尚未結束／429**：取消舊要求或關閉原視窗，再稍等重試。同一助手一次只讓一個要求等待，避免多個難以分辨的確認窗。
+- **401／404**：新配對的 401 通常代表仍跑舊助手；狀態領取的 404 代表過期、已領取、來源或秘密不符，不能直接跳過驗證。不要把 token、nonce 或整個 config.json 貼到公開日誌。
+- **回復舊操作**：展開「手動配對（備用）」輸入助手碼即可，不必回復程式或重裝模型。
+- **修改範例**：若要讓原生確認等 60 秒，需同步 pairing.py 的父程序 deadline、子程序 Timer、視窗文案，以及 workspace.js 的 90 秒提示；整體 PAIR_TTL 與 client 的 120 秒期限應長於確認時間，並保留取消／晚到的允許結果測試。新增另一種配對 UI 時重用 Pairing 的狀態機，不可讓前端直接自行設定 approved。
+
+## 0.3.6：授權流程與專案 review（2026-10-27）
+
+這次未新增產品功能，集中修正既有流程。先前測試主要模擬 Chrome 外掛 API，漏掉真實權限拒絕時網址也可能被隱藏的情況；舊 extension-smoke 在找不到外掛時仍以成功結束，也降低了測試的可信度。以下區分已驗證與仍未驗收，歷史版本的測試數字不代表目前覆蓋率。
+
+### 修正與流程
+
+- **摘要授權沒有入口**：summary.js 原本只叫使用者切到網頁頁籤，卻沒有顯示該頁授權按鈕。現在摘要自己的 summary-grant 會呼叫 panel.js/requestSiteAccess；inject 將失敗當下的 accessTarget 附在錯誤上，避免其他功能覆寫同一個授權目標。程式載入失敗、禁止讀取頁面等其他錯誤不再一律要求授權。
+- **網址被 Chrome 隱藏**：能確認來源時僅 request 單一主機；沒有網址時使用 permissions.addHostAccessRequest({tabId})，由 Chrome 選擇該分頁的網站。此 API 只是提出請求，必須到拼圖選單確認，或直接點工具列清讀圖示取得 activeTab 暫時權限。拒絕授權後不自動讀正文；來源變更後不自動繼續。
+- **其他視窗誤停工作**：panel.js/inject 保留 windowId；網頁翻譯、影片字幕與單字查詢只因來源視窗切頁而停止。摘要先前已有同類防護。側欄真的隱藏時字幕仍依既有設計停止。
+- **助手並行存檔**：app.py 的設定寫入、工作持久化、刪除、過期清除及工作列表快照共用 RLock。RLock 是可重複進入的互斥鎖，同一執行緒內函式互相呼叫不會把自己鎖住，但不同請求不能同時替換同一暫存設定檔或刪除正在寫入的工作目錄。鎖只保護短的檔案／記憶體操作，不包住模型推論。
+- **錯誤輸入變成 500**：/prepare 的 kind 先檢查字串；/v1/chat/completions 的 role 使用可接受任意 JSON 值的比對。傳入陣列／物件會得到 HTTP 400，代表要求格式錯誤，不再誤導為助手安裝故障。
+- **測試漏報**：tests/extension-smoke.cjs 在外掛載入、授權、讀取或實際摘要失敗時必須非零結束，留下 failed 報告，不再把未驗證視為通過。
+
+摘要資料流：summary-start → activeTab → inject(content.js) → tabs.sendMessage 的 qingread:summary-source（綁定 documentId，避免讀到導覽後另一份文件）→ 可見原文前 6,000 字元 → local-client.js 的 POST http://127.0.0.1:8765/summarize → app.py/summarize/chat → 本機 Ollama → summary-result.textContent → 顯示 summary-output。授權失敗發生在 inject，當時尚未送摘要給模型。
+
+### 驗證範圍
+
+本輪 review 檢視網頁擷取／翻譯／還原、語言辨識、文字翻譯、摘要、字幕與單字、配對／工作室、本機 HTTP、PDF 工作生命週期及打包。9 項核心、59 項瀏覽器流程、16 項 Python 回歸測試通過（合計 84 項）。瀏覽器流程測試仍使用模擬翻譯及外掛 API；Python 使用人工輸入及模擬模型／PDF 子程序，不等於模型或 OCR 品質驗收。
+
+另用獨立 Chromium 設定檔載入真正的外掛，未替換 chrome API，驗證無權限時摘要按鈕、真實 addHostAccessRequest、Chrome 工具列 action 授權與正文讀取。工具列動作由 Chromium 的測試介面觸發，未自動點選持續網站授權的原生對話框。測試中的面板以外掛分頁執行相同 panel.html，不能取代使用者自己 Chrome 側欄的最終驗收。
+
+你提供的 https://code.claude.com/docs/zh-TW/overview 已於本輪以真實外掛擷取 3,647 字元，經既有本機 Ollama 模型回傳後顯示「摘要已完成」及非空結果；已檢視 test-results/summary-real-extension.png。執行中的助手 /health 已確認為 0.3.6。此結果也保存在 test-results/extension-smoke.json。
+
+尚未重新端到端驗收：Chrome 語言包下載、分頁錄音、長影片同步、OCR／PDF 真實排版、所有網站與全新安裝；不可宣稱全部功能零 bug。預設權限與雲端處理策略沒有擴大。
+
+### 更新、排查與維護範例
+
+1. 關閉舊側欄，在 chrome://extensions 重載本專案 extension，刷新文章，再點工具列清讀；確認右上角 v0.3.6。助手 /health 也應回報 0.3.6，修改磁碟檔案不會更新已執行的 Python。
+2. 摘要顯示「無法讀取」：按摘要下的「允許此網站」並到 Chrome 拼圖選單確認；或直接點清讀工具列圖示後再摘要。沒有網址時顯示通用按鈕是正常現象，不能因此申請所有網站權限。
+3. 顯示「模型整理中」：表示讀正文已成功，改查助手及 Ollama，不需重複授權。狀態列會顯示等候秒數，可停止。顯示完成但空白時檢查 summary-output.hidden、summary-result.textContent，以及是否發生來源切頁；不要公開文章或配對碼。
+4. 工作清除或設定儲存失敗：先以人工工作重現並執行 Python 測試；同時開兩個工作室操作也不應出現 500。不要在 worker 尚未停止時手動刪 data/jobs。
+5. 修改範例：未來新增需要讀頁面的功能，重用 inject 和 requestSiteAccess，直接在使用者點擊中啟動授權，不能先 await 查詢才呼叫 permissions.request；保存來源 tabId/windowId/documentId，補「網址隱藏」「拒絕」「切頁」「另一視窗活動」測試。新背景工作只在短的資料更新區間持有 self.lock，勿將長時間下載或推論放進鎖內。
+
+真實外掛測試需 Playwright 附帶的完整 Chromium，不能用已移除命令列側載能力的品牌 Chrome 當作通過證據，見 [Playwright 外掛測試說明](https://playwright.dev/docs/chrome-extensions)。[Chrome activeTab 說明](https://developer.chrome.com/docs/extensions/develop/concepts/activeTab) 列出可授權的使用者動作；側欄內的普通按鈕不會自動取得工具列授權。
+
+```powershell
+# 使用已安裝的 Playwright Chromium；若自行指定 CHROME_PATH，須指向完整 Chromium。
+Remove-Item Env:CHROME_PATH -ErrorAction SilentlyContinue
+npm run test:extension
+# 真實網站＋現有本機助手／Ollama；讀取既有配對碼但不輸出，不會改模型設定。
+$env:LIVE_SUMMARY = '1'
+npm run test:extension
+Remove-Item Env:LIVE_SUMMARY
+```
+
+## 0.3.5：摘要結果可見性修正（2026-10-27）
+
+使用者回報摘要狀態有更新但結果區空白。以 0.3.4 完整安裝包作為基準比對，續作前僅有上次未打包的五個檔案差異：extension/panel.html、panel.css、summary.js、tests/browser.test.cjs、README.md；沒有新增功能模組、依賴或網站權限。專案沒有 Git 紀錄，因此這是與安裝包的內容比對，不能判斷每個變更的作者。檔案內容與上次中斷的摘要修正一致。
+
+已重現的程式問題：短側欄的結果起點可能落在可視區底部；在別的 Chrome 視窗切分頁會誤清除此視窗摘要；完成後查詢焦點視窗若發現不同分頁，原程式會直接返回而留下「整理中」。另外，背景完成後回到摘要頁籤，也可能再次看不到位於畫面下方的結果。這些測試重現不代表已直接觀察到使用者當時的唯一根因。
+
+### 變更、流程與取捨
+
+- panel.html 新增有標題的 summary-output 結果區，panel.css 控制邊框、顏色與換行，讓完成與空白狀態有明確區別。
+- summary.js 接收 /summarize 的 text → 核對來源視窗的活動分頁 → 將純文字放入 summary-result → 顯示結果區、啟用複製 → revealResult 捲到結果。完成、側欄恢復可見、點回摘要頁籤三個時機共用 revealResult；其他頁籤使用中不強制捲動。
+- 發送摘要時記住 sourceWindowId；別的視窗切分頁不取消。來源視窗真的切頁或原頁重新載入，仍清除摘要，避免把上一頁摘要當成目前頁面內容。核對失敗會明示「來源分頁已變更」，不再無聲丟棄結果。
+- 等待模型時顯示已等候秒數；完成、停止或失效時清除計時器。這只表示等待時間，不是模型完成百分比。
+- 暫時隱藏側欄後可繼續處理已擷取原文；pagehide（側欄文件卸載）及手動停止仍會取消。關閉側欄後未提供歷史或恢復功能，重要摘要請先複製。
+
+### 更新、排查與自行修改
+
+1. 關閉舊側欄，在 chrome://extensions 對目前載入的清讀按重新載入，再開側欄確認右上角 v0.3.5。若使用 ZIP，須先解壓並確認 Chrome 載入該份 extension 資料夾；只下載 ZIP 不會更新已載入的副本。
+2. 按「整理本頁摘要」；等待時應看到秒數，完成時會看到「摘要已完成」及有邊框的「本頁摘要」區。若字不在畫面內，重新點「網頁摘要」會再捲到結果；若顯示來源分頁變更，回到要閱讀的來源頁後重試。
+3. 顯示完成但仍沒有結果時，先看「複製摘要」是否可按：可按代表程式已收到有效文字，先點回摘要頁籤並檢查載入版本；不可按則確認狀態是否其實是已停止、沒有正文或助手錯誤。持續整理中請先用短文章確認模型速度，不要把秒數當成進度百分比。
+4. 這次顯示修正相容於已提供 /summarize 的 0.3.4 助手，不需要因而重啟正在工作的助手或重裝模型；完整 0.3.5 套件中的助手版本號亦同步更新，下次啟動才會回報 0.3.5。若出現舊版助手 404，依下方 0.3.4 的現場排查處理。
+5. 維護範例：要調整結果的位置或配色，改 panel.html 的 summary-output 與 panel.css；捲動時機只改 summary.js/revealResult 及它的事件註冊。修改後至少檢查 380×520 的短側欄、背景完成後回來、切回摘要頁籤，以及別的視窗切頁不清除；不要取消來源分頁真正變更時的失效檢查。
+
+本次驗證：9 項核心、53 項瀏覽器流程、14 項 Python 測試全數通過，合計 76 項；摘要相關 10 項瀏覽器測試亦單獨通過。瀏覽器測試使用實際 Chrome 渲染，擴充功能 API 與模型回應是模擬。已檢視短側欄截圖，確認結果標題與文字可見。尚未直接取得使用者 Chrome 側欄狀態，使用者實際文章與外掛仍需更新後核對；先前助手端的真實模型摘要驗證紀錄保留在 0.3.4 章節。
+
+## 0.3.4：功能巡檢與取消／輸入邊界修正
+
+本次巡檢涵蓋網頁／反白翻譯、貼上文字翻譯、用語與詞彙表、語言辨識、摘要、影片字幕／語音流程、Alt 單字解釋、內嵌課文入口、配對、PDF 與資源下載。以下區分可重現的程式缺陷與尚待實機驗收的功能，測試通過不代表所有網站或模型都已驗收。
+
+### 已修正的問題與理由
+
+| 功能 | 修改前 | 修改後與重要檔案 |
+| --- | --- | --- |
+| 語言辨識 | 直接取 main/article/h1 的 textContent，可能包含隱藏文字及已插入譯文；不受工作鎖或切頁取消管理，遲到結果可改掉另一頁的語言 | panel.js 的 detect handler 共用 content.js 的原文擷取；使用 running、assertLive、waitForEngine，停止／切頁後丟棄結果並銷毀遲到的辨識器 |
+| Alt 單字解釋 | 關閉後 500ms 計時器仍可能填入舊單字；移到空白時沿用舊單字，延遲解釋可出現在新位置 | media-content.js 的 clearWord 同時取消計時器、清單字、提高 wordVersion、移除提示；移動或關閉立即作廢舊結果 |
+| PDF 頁碼 | 僅檢查允許的字元，0、反向範圍、超出頁數、空項目均可能送入引擎，失敗或產生未按預期翻譯的輸出 | app.py 的 validate_pages 依實際文件頁數檢查並正規化，非法頁碼回 PAGES，不建立工作 |
+| PDF／資源下載取消 | 排隊時已取消仍啟動子程序；取消碰上程序結束可能被標成完成 | run_pdf、start_prepare 在啟動前及程序結束後檢查取消，最終成功與 delete_job 的取消操作共用鎖；取消時不列成功輸出 |
+| 摘要 | 等待分頁查詢時停止，回應到達後仍注入；內嵌內容未涵蓋卻顯示字數達上限 | summary.js 在注入前核對工作仍有效，範圍提示說明未包含內嵌頁面 |
+| 助手輸入驗證 | JSON 的 source 若是陣列／物件，集合查詢拋出 TypeError，回 500 | safe_language 先檢查字串型別，回 400／LANGUAGE，便於使用者辨識輸入問題 |
+
+設計取捨：語言辨識沿用正文過濾，沒有可讀正文就請使用者手動選語言；不再以整個容器的原始文字或 html lang 猜測。PDF 頁碼以文件的實際頁數為準，拒絕超界而不靜默裁切。維持上游既有的開放範圍語法：5 頁文件的 `2-` 正規化為 `2-5`、`-3` 為 `1-3`；空白代表全部。取消是非同步請求，已啟動的程序仍需等停止與收尾，介面可能到下一次工作輪詢才更新；已完成的工作按清除則刪除檔案。
+
+### 資料與執行流程
+
+1. **辨識**：panel.html 的 detect → 同步建立 LanguageDetector（保留點擊資格）→ activeTab／inject 精確定位文件 → qingread:summary-source → content.js/collect 過濾可讀原文、排除表單及譯文 → 取前 1,500 個 Unicode 字元 → detect → assertLive → 更新 source、重新檢查引擎。翻譯與辨識共用工作鎖，因此準備期間不會同時開始另一個文字／網頁翻譯工作。
+2. **單字**：pointermove → clearWord 作廢舊位置 → 停留 500ms 才取新單字 → video.js 輪詢 word/version → POST /explain → 原 wordVersion 仍有效才顯示。這裡的「版本」是計數器，用來判斷回應是否仍屬於目前滑鼠位置。
+3. **PDF**：workspace.js 上傳 → POST /pdf → start_pdf 開檔檢查 → validate_pages → new_job 寫 input.pdf/options.json → run_pdf 啟動 pdf_worker.py → BabelDOC／本機助手／Ollama → 檢查取消及 result.json → 工作列出 output/*.pdf。頁碼錯誤不會寫入新工作目錄。
+4. **取消**：工作室 DELETE /jobs/{id} → delete_job 設 cancel Event（背景執行緒可讀的停止旗標）→ worker 啟動前／執行中／結束後檢查 → cancelled → 清除 PDF 配對參數 options.json、持久化 job.json → 工作室輪詢更新。原檔、快取與已產生檔案仍留在該工作目錄，需再按清除或等過期清理。
+5. **摘要**：分頁查詢回來後先確認 task 未被停止，再注入及讀正文；之後仍保留原本的停止、切頁與導覽失效檢查。
+
+### 排查、回復與自行修改
+
+- **辨識沒反應或語言不對**：先確認右上角 v0.3.4、刷新原頁；展開正文後按辨識，觀察網頁頁籤的狀態及診斷。內嵌課文需另開來源；沒有可讀正文就手動選語言。準備卡住可按停止，重新開始；語言包建立與辨識各沿用 120 秒期限。切頁後不應再被舊辨識結果更改語言。
+- **單字提示停在舊詞**：確認按住 Alt 且停留超過 500ms，移到空白應立刻消失；在側欄關閉單字功能再開啟。若未更新頁面，舊 media-content.js 仍在頁面內，必須刷新。辨識到詞但沒有解釋時，檢查助手配對／Ollama；不需擴大網站權限。
+- **PDF 顯示頁碼錯誤**：用 PDF 檢視器確認總頁數，先輸入 `1`，再試 `1-3`；5 頁文件不能填 `6`、`0` 或 `4-2`。PAGES 是使用者輸入錯誤，HTTP 400；若是引擎錯誤，依既有 PDF 排查流程先用一頁確認。頁碼有效仍處理失敗時，查看該工作的 result.json 安全錯誤碼，不要公開 options.json、全文或配對碼。
+- **取消後仍顯示處理中**：等下一次約 3 秒工作輪詢及子程序退出；重開工作室並重新檢查連線。確認助手是新版，因為只重載外掛不會更新執行中的 Python。取消完成後再按清除刪原檔與快取；不要在程序執行中手動刪工作目錄。重啟助手會將中斷的工作恢復成失敗，需重新提交。
+- **修改範例**：要把辨識樣本從 1,500 改為 2,000 字元，改 panel.js/detect handler 的 `slice(0,1500)`，保留 Array.from 以免切斷 Unicode 字元，並補長文樣本測試。要新增 PDF 頁碼語法，只改 validate_pages 的解析及正規化規則，同步工作室提示與 tests/test_companion.py；務必測非法輸入不建立工作。要改單字停留時間，調 media-content.js 的 500ms 並更新瀏覽器測試的等待，保留 clearWord 與 wordVersion 檢查。
+
+### 驗證與操作
+
+已驗證：9 項核心、48 項瀏覽器流程、14 項 Python 測試全部通過（合計 71 項）。新增 5 項瀏覽器與 6 項 Python 回歸測試；瀏覽器使用實際 Chrome 執行測試頁，但擴充功能 API、Translator、LanguageDetector、助手回應使用模擬。Python 測試涵蓋本機 HTTP 授權、輸入驗證、工作取消與頁碼；新增 PDF 測試使用模擬文件與子程序，不執行真實模型推論。本次未重新驗收真實網站字幕、分頁音訊、OCR／PDF 排版或模型翻譯品質。
+
+更新：關閉舊側欄 → 重載 extension 資料夾 → 刷新要翻譯的網頁 → 關閉舊助手並重新執行 companion/start.cmd → 確認外掛與 /health 都是 0.3.4。沿用既有模型與資料，不需重新下載資源。
+
+2026-10-22 摘要 404 現場排查：畫面出現「請重新啟動新版本機助手，再整理摘要」時，實際查詢 8765 埠的 /health 回報 0.2.0，POST /summarize 回 404／NOT_FOUND；磁碟上的 app.py 已是 0.3.4。這次已確認是舊程序仍在記憶體執行，不能只以外掛右上角版本或 app.py 檔案內容判斷助手已更新。先確認 /jobs 沒有 queued／running 工作，再停止占用 8765 的舊助手並從本專案 companion 啟動新版；沿用原 data/config.json，因此不需換模型或配對碼。診斷過程不得輸出 config.json 中的配對碼。重新啟動後應檢查 /health，再用人工短文測試 /summarize，最後回側欄按「整理本頁摘要」。
+
+本次摘要恢復驗證：執行中的 /health 已回報 0.3.4；使用既有本機 Llama-Breeze2-8B Q8 模型，人工圖書館公告短文經 POST /summarize 約 45.8 秒完成，回傳繁中總覽與五個重點。這是助手端的真實模型驗證，尚未代替使用者在目前側欄與實際文章再按一次摘要。
+
+本機測試（專案根目錄 PowerShell）：
+
+```powershell
+npm test
+$env:CHROME_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+npm run test:browser
+.\companion\.venv\Scripts\python.exe -m unittest discover -s tests -p test_companion.py
+```
+
+若 Playwright 顯示找不到測試瀏覽器，可用上述 CHROME_PATH 指定已安裝 Chrome；若安裝路徑不同請調整。HTTP 測試需要允許測試程序連回暫時的 127.0.0.1 服務，WinError 10013 表示執行環境阻擋連線，不能當作功能測試通過。
+
+## 0.3.3：文字翻譯、影片啟動修正與助手版本回報
+
+影片修正：video.js 原本把「Chrome 沒回傳 tab.url」直接當成不是一般網頁，因此即使 YouTube 正在播放也可能顯示「請先開啟一般網頁中的影片」。現在 target() 共用 panel.js 的 activeTab()／inject(tab, 'media-content.js')，網址缺省時仍嘗試載入讀取程式，由 Chrome 的實際結果判斷權限。沒有新增預設網站權限。這是程式碼確認的缺陷；使用者當時實際 Chrome 的回傳值未直接取得。
+
+影片資料流程：按開始字幕 → 同步建立翻譯器（保留點擊資格）→ 檢查目前分頁並載入 media-content.js → 等待引擎 → qingread:media-start → 每 250ms 讀取已顯示原字幕 → 字幕穩定後翻譯 → media-show 顯示雙語。等待引擎與單次翻譯有 120 秒期限；停止會取消等待，遲到的翻譯器會釋放。權限錯誤會先顯示，不必等模型下載結束。
+
+影片排查：更新外掛、重新整理 YouTube、開啟播放器原文字幕，再到「影片字幕」按開始。停在「等候原文字幕」時，先確認影片正在播放且字幕有文字；若出現存取權問題，按「處理此網站的存取權」切到網頁頁籤，再使用該頁的單站授權入口，完成後回影片頁籤重試。沒有字幕的影片需另選本機語音辨識，這次沒有改變其硬體需求。維護時新增字幕來源應修改 media-content.js 的字幕擷取，保留版本檢查，避免把上一句譯文放在下一句上；不要再用缺少 tab.url 判定分頁不可讀取。
+
+本次最終驗證：9 項核心、43 項瀏覽器流程及 8 項 Python 測試通過。影片新增測試涵蓋缺少網址仍可啟動／顯示字幕、真正權限失敗先報錯並清理遲到引擎、準備途中停止不會延遲啟動。瀏覽器測試使用模擬擴充功能 API 與翻譯引擎，尚待使用者 YouTube 實機驗收。
+
+側欄新增「文字翻譯」頁籤：貼上或輸入文字，用上方已選的引擎與原文語言翻成繁中，不讀取目前網頁。用途是網頁翻譯拿不到的文字，例如聊天訊息、郵件片段、Chrome 內部頁或禁止外掛讀取的頁面；需要保留排版的文件仍走 PDF 工作室。另修正本機助手 /health 一直回報 0.2.0 的問題。
+
+text.js：按「翻譯文字」時，在 click 的同步階段呼叫 panel.js 的 createTranslator，保留 Chrome 下載語言包需要的使用者操作資格；再用 core.js/splitText 每 1,200 字元切塊、逐塊翻譯，以換行接回。每完成一塊就顯示累積譯文，依序套「台灣用語 → 自訂詞彙表」，與網頁翻譯相同。每次最多 6,000 字元；textarea 的 maxlength 只限制打字，程式另外檢查長度。翻譯期間原文唯讀；修改原文會清空舊譯文並停用複製，避免原文與譯文對不上。停止會保留已完成部分並標示尚未完整，清空則取消等待並移除全部內容；已送進 Ollama 的片段可能仍運算到完成，但晚到結果不顯示。輸入與譯文不寫入 storage、不留歷史，關閉側欄即消失；複製只在按鈕操作時寫入剪貼簿。
+
+### 長文逐段顯示與取消修正（2026-10-30）
+
+以下記錄先前的瀏覽器端修正；目前已加入助手取消與接續翻譯，請以上方「目前開發狀態與紀錄」及進度文件為準。
+
+原本長文的完成段落先存在函式內，要等整篇完成才顯示；中途停止或後段錯誤，前段譯文也無法取用。現在每完成一塊就更新 `text-output` 並啟用複製，處理中與中斷時明確標示「尚未完整」。全部完成才標示完成；複製部分內容後仍保留不完整提示。這是完整區塊逐段顯示，不是逐字串流，也不會加快模型本身。停止後再次開始仍從原文起點翻譯，會清空舊部分結果，若需要保留請先複製。
+
+資料流：`text.js/text-start` → `splitText` → `createTranslator` → 每塊 `translate` → `assertLive` 檢查工作尚未取消 → 累積 `outputs` → 用語及詞彙表 → `text-output`。`outputComplete` 記錄是否全部完成；`outputRevision` 記錄畫面版本，防止較晚完成的剪貼簿操作覆蓋清空或新結果的狀態。原文修改及清空都會重設這兩個狀態，部分結果不會跨工作沿用。
+
+本機取消流程：工作的 `AbortController`（取消通知器）→ `local-client.js/translator.translate(text, {signal})`，以 `AbortSignal.any` 合併單筆取消與整個翻譯器的 `destroy()` → `request` → `fetch`。原本 `translate` 忽略傳入的單筆訊號，現在單筆取消不會毀掉其他可用的翻譯器工作；`destroy()` 仍取消該翻譯器的所有請求。已取消的工作在送出前直接拒絕，讀取配對資訊後與讀完 JSON／二進位回應後也再檢查，避免晚到結果被當成成功。這只保證瀏覽器請求與結果處理停止，沒有新增助手端取消 API，無法保證 Ollama 立即停止運算。
+
+排錯：長文先看「正在翻譯 X / Y」，第一塊尚未完成時譯文仍是空白；已有部分結果而後續卡住，可按停止並複製。按清空後若舊內容重新出現，檢查 `assertLive` 是否仍在每次 await 後、`invalidate` 是否更新畫面版本。停止後助手仍忙，可能是已開始的模型運算尚未結束，先等該工作釋放，不要反覆按開始增加工作。更新只需重載外掛並重開側欄，助手未修改。
+
+維護例：若調整切塊長度，修改 `core.js/LIMITS.chunk`（由 `splitText` 使用）後，驗證第一塊可提早閱讀、全數合併不漏字，以及停止／失敗保留部分、清空全部移除四種結局；此限制也供網頁翻譯使用，兩者都要驗證。不能把 `outputComplete` 提前設為 true，否則複製部分內容時會誤稱完整。單元測試新增單筆取消、送出前已取消、讀回應中取消；瀏覽器測試新增四種長文結局及清空後的晚到複製回應，使用模擬引擎，不代表真實模型品質或伺服器取消驗收。測試指令為 `npm.cmd test`，以及設定 `CHROME_PATH` 後執行 `npm.cmd run test:browser`。
+
+本輪最終驗證：31 項 JavaScript 單元測試、82 項瀏覽器流程全部通過。取消相關 3 項新測試已先在舊實作重現失敗，再於修正後通過。Python 助手未修改，未重跑其測試。
+
+文字與網頁翻譯共用 panel.js 的 running 工作鎖（同一時間只跑一個翻譯工作）：一邊在翻時，另一邊的開始按鈕停用；語言包下載進度透過 job.report 顯示在文字頁籤自己的狀態列。文字翻譯工作帶有 kind:'text' 標記；panel.js 的 tabs.onActivated 只取消網頁翻譯（與測試引擎），**切換瀏覽器分頁不會停止文字翻譯**，網頁頁籤的狀態列也不會被改成「已切換分頁」。理由是網頁翻譯切換分頁必須停，否則譯文可能插到錯的頁面；文字翻譯不讀任何分頁，沒有這個風險，使用者常會切到別的分頁複製下一段文字。關閉或隱藏側欄仍會停止文字翻譯，因為翻譯器跑在側欄頁面裡。
+
+助手版本：app.py 新增 VERSION 常數，/health 與 HTTP Server 標頭改回報實際版本（原本寫死 0.2.0／0.2）。外掛目前還沒讀這個欄位；它的用途是排查時確認執行中的是不是新版 start.cmd，不必再從新功能回 404「找不到此功能」去推測。手動查詢（配對碼取自助手視窗，不要貼進紀錄或截圖）：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/health -Headers @{ Authorization = 'Bearer <配對碼>' }
+```
+
+操作：更新外掛 → 重開側欄確認 v0.3.3 → 文字翻譯 → 貼上 → 翻譯文字 → 複製譯文。本機模型模式需先配對，未配對會直接顯示配對提示。助手版本號要重新啟動 start.cmd 才會更新；翻譯功能本身不需要重啟助手。
+
+資料流程：文字翻譯頁籤 → text.js click → createTranslator（Chrome Translator，或 local-client.js → POST /translate → app.py translate → Ollama → OpenCC）→ splitText 逐塊翻譯 → localize／applyGlossary → 以 textarea 純文字顯示。不經過 content.js、不注入或讀取任何分頁。
+
+Debug：按鈕停用時先看引擎狀態（與網頁翻譯同一個檢查）；一直停在「正在準備」就停止，到網頁翻譯頁籤按「測試引擎」。本機模式顯示的是助手回應的錯誤訊息；Chrome 模式只顯示分類過的錯誤，不顯示原始訊息。翻到一半出現「已停止」，先確認是否關閉或隱藏過側欄，或在網頁翻譯頁籤按過停止（兩頁籤共用工作鎖）。若切換分頁就停止，表示載入的是舊版，或 text.js 建立工作時少了 kind:'text'。複製失敗是剪貼簿權限問題，可反白譯文手動複製。
+
+維護例：要調整 6,000 字元上限，需同步 text.js 的長度檢查、panel.html 的 maxlength 與字數提示，以及瀏覽器測試；本機模式另有 app.py/translate 每次 12,000 字元的限制，每塊 1,200 字元不會碰到。要做反向翻譯（繁中 → 英文）不能只加選單：app.py/translate 的 system instruction 固定翻成繁中，chat() 也會再用 OpenCC 轉繁體，需新增目標語言參數並調整轉換。改版時同步 app.py 的 VERSION；test_companion.py 會比對 VERSION、manifest 與 package.json，不一致就失敗。
+
+驗證：9 項核心、40 項瀏覽器流程、8 項 Python 測試通過。新增 5 項文字翻譯瀏覽器測試：由點擊建立引擎且不注入／不讀網頁、用語與詞彙表套用順序、複製、修改原文清空譯文；空白與超長輸入不建立引擎、長文切塊不漏字；停止後延遲結果不顯示並解鎖輸入；切換分頁後文字翻譯照常完成、網頁狀態列不變（已確認舊條件下此測試會失敗）；本機模式只送 /translate 且顯示未配對錯誤。原有「切換分頁停止網頁翻譯」測試仍通過。Python 新增版本一致性與 HTTP /health 版本檢查。翻譯與擴充功能 API 仍為模擬，尚未在使用者 Chrome 完成文字翻譯實機驗收。
+
+## 0.3.2：導覽排除與內嵌課文入口
+
+使用者的 NVIDIA 課程截圖顯示導覽擠成直排，中央課文未翻譯。此環境開課程 URL 被導到公開訓練首頁，無法核對使用者登入後的 DOM；內嵌課文是待驗證推論，不能宣稱已完整支援該課程。此版提供有測試的偵測與手動另開退路，不是跨來源 iframe 原地翻譯。
+
+content.js 排除 header、banner、menu、menubar 與短的純連結群組（反白例外），避免把導覽當正文。embeddedPages() 檢查當頁可見、至少 300×150 的 iframe，最多 10 個，只讀元素的 title/src，不讀 iframe 內文；可能也找到影片，使用者須辨識課文來源。srcdoc／特殊協定不提供另開連結。NVIDIA /courses/course 若找到此類 iframe，整頁模式停止翻外層並提示未翻譯課文，不再只翻目錄卻顯示成功。其他頁面的完成提示與摘要部分範圍會註明未涵蓋內嵌內容。
+
+操作：更新外掛並重新整理原課程頁，先清除舊譯文干擾。展開「課文沒有翻到？」→「尋找內嵌課文」→ 檢查列出的標題及網域 → 點來源另開頁面 → 在新頁面點清讀開始翻譯。原課程頁保留；新來源若需要登入或授權，遵循該網站／Chrome 的正常流程。找不到可開網址、頁面被導回首頁或新分頁不能讀取時，這條退路不可用，仍需後續取得實際結構診斷。沒有新增網站權限、也不會自動開啟來源。
+
+資料流程：panel scan → inject → qingread:frames → content.js embeddedPages → frames.js 以 textContent 顯示標題與主機名 → 使用者點擊 → 核對當前 tabId、documentId 與來源仍存在 → tabs.create → 在新分頁走既有翻譯。URL 不寫入設定或日誌，完整網址只在開啟來源時交給 Chrome；查詢參數可能是課程識別資訊，不在狀態列顯示。切換分頁或導覽清除舊來源選項。
+
+維護例：如需調整 iframe 尺寸門檻，改 embeddedPages 並測試隱藏框架不列出；不要只取消可見性檢查來找登入或追蹤框架。若要做跨來源原地翻譯，需另設 frame-specific 授權、document targeting 及導覽取消流程，不要把此版的「另開」誤寫為原地支援。短純連結群組可能漏掉簡短超連結段落，可反白補翻。
+
+驗證：9 核心與 35 瀏覽器流程測試通過；新增 NVIDIA 模擬外殼不翻導覽、隱藏 iframe 排除、摘要不冒充已讀課文、僅使用者點擊才開可驗證 http(s) 來源。使用者真實登入課文未能在此環境開啟，尚待新版實機驗收。
+
+## 0.3.1：網站授權確認與注入錯誤分類
+
+使用者在 learn.nvidia.com 課程頁收到舊版 PageAccessError。舊 inject 捕捉所有 executeScript 失敗後都改成權限錯誤，不能據此判斷 NVIDIA 禁止外掛或一定未授權。此版修正授權流程與診斷；未宣稱已在使用者 Chrome 重現唯一根因。
+
+panel.js / inject 使用 core.js / injectionErrorName 將瀏覽器錯誤分成 PageAccessError（已知權限訊息）、PageChangedError（分頁／frame 消失）、ExtensionLoadError（外掛檔案或環境失效）、PageRestrictedError（瀏覽器受限頁）、PageInjectionError（其他原因）。原始錯誤、網址 query 與內容不顯示。只有權限錯誤顯示授權按鈕。
+
+授權流程：已知 tab.url，或 Chrome 已知的 Cannot access contents of url 格式能辨識來源時，只保留 origin／hostname 與 tabId，按鈕顯示主機名。使用者按下後，在 click 的同步階段呼叫 permissions.request({origins:[該協定與主機+'/*']})；不要求全部網站、子網域或 tabs。Chrome 回傳 true 後重新查目前分頁與 origin，相符才嘗試 inject，成功後才提示可以開始翻譯。拒絕或切換頁面不會自動翻譯；分頁切換／導覽會清除待授權目標。無法辨識網址時保留 addHostAccessRequest({tabId}) 退路，明確說尚未授權。
+
+更新與排查：關側欄、重新載入外掛、刷新 NVIDIA 頁，直接點工具列清讀，確認 v0.3.1。若顯示「允許 learn.nvidia.com」，按鈕後在 Chrome 確認授權，再等「已確認可以載入讀取程式」，最後按開始。若只顯示「允許此網站」，仍需到拼圖選單確認。持續授權可於清讀詳細資料的網站存取權撤回。ExtensionLoadError 先核對外掛資料夾完整與重載；PageChangedError 等網站載入穩定；PageInjectionError 請保留新診斷再排查，不要不停擴大權限。
+
+資料流程：點開始 → inject → 分類錯誤 → 可選的單站授權 → 核對分頁 → inject 驗證 → 使用者再次開始 → 原本 collect／translate／apply。摘要也使用相同 inject 診斷；本機助手不需更動。維護例：新增 Chrome 錯誤模式應在 core.js 的白名單分類加入測試，不能直接把 raw message 顯示給使用者；授權務必保留同步 click、單一主機與導覽清除行為。
+
+驗證：9 項核心與 33 項瀏覽器流程測試通過，包含單站授權範圍、使用者操作資格、授權後才驗證注入、不自動翻譯，以及檔案錯誤不索取網站權限。瀏覽器擴充功能 API 為模擬，尚未完成使用者 Chrome 的 NVIDIA 授權／翻譯驗收。官方 API 依據：https://developer.chrome.com/docs/extensions/reference/api/permissions 。
+
+## 0.3.0：課綱重疊修正與網頁摘要
+
+Skilljar 課綱的 .lesson-modular 固定高度為 44px，中文插入後原列不增高而重疊。content.js / apply 僅對此網域、包含清讀譯文的課綱列套用 height:auto、min-height:44px 與無最大高度；仍保留原列／點擊結構。restore 移除外掛加入的樣式與譯文，恢復網站原版型。
+
+新增「網頁摘要」頁籤，使用已配對本機助手的文字模型；Chrome Translator 不能執行此摘要功能。先更新外掛，再關閉舊助手並執行 companion/start.cmd（不需要重裝模型），在 PDF 與助手設定完成配對後，於網頁按「整理本頁摘要」。可停止或複製結果；切換分頁、原頁重新載入時清除舊摘要。停止會取消前端等待，已送進 Ollama 的推論可能仍運算至完成。
+
+摘要範圍：目前正文與已展開 FAQ，最多前 6,000 Unicode 字元；不讀表單、隱藏答案或連結中的其他課程，不會抓整個網站。內容超限或擷取達到 200 段／60,000 字元上限時明示「部分內容／未涵蓋全文」。這是有範圍限制的第一版，並非長文分段合併摘要。模型被要求一句總覽、三到五個重點及限制，但可能不完全遵守格式，重要資訊需對照原文。
+
+資料流程：summary.js → activeTab/inject → qingread:summary-source → content.js collect（原文順序、包含已翻譯原文、排除插入的中文，不覆寫翻譯工作 ID）→ 取前 6,000 字元 → local-client.js 帶配對憑證 POST http://127.0.0.1:8765/summarize → app.py summarize 驗證長度與建立系統提示 → 既有 chat/Ollama/OpenCC → textContent 在側欄顯示。網頁是 user 資料，不是系統指令；沒有工具執行或雲端備援。摘要不寫入本機助手檔案，複製只在按鈕操作時寫入剪貼簿。
+
+Debug：未配對／無法連線時檢查助手視窗、配對及已下載模型；「找不到此功能」代表舊助手仍執行，請重啟。沒有正文時展開區塊再試；讀取權限問題到網頁翻譯頁籤處理。若仍重疊，核對新版已刷新原網頁，再檢查祖先是否有其他固定高度；不要將 auto 高度全站套用。回復版面用還原目前網頁或刷新。
+
+維護例：調整摘要格式，改 app.py / summarize 的 system instruction；若要提高長度上限，需同步 summary.js 截取長度、後端驗證、HTML 說明與測試，並評估模型 context window（目前 chat 設為 8192 token，不等於 8192 中文字）。新增長文合併需另外設計，不能只移除截斷提示。介面在 panel.html／summary.js；style 插入及移除都在 content.js。
+
+驗證：8 核心、31 瀏覽器流程、7 Python 測試通過，包含重疊／還原、摘要原文擷取、停止後丟棄延遲結果、部分內容標示、純文字防注入、後端長度及 HTTP 授權。另使用已安裝 Breeze 本機模型摘要一段測試文章，成功輸出繁中與關鍵事實；模型列出六點而非要求的三至五點，格式仍有模型限制。測試結果保存在 test-results/summary-real.txt，不包含使用者網頁。尚未在使用者已安裝 Chrome 完成新版端到端驗收。
+
+## 0.2.8：納入已展開的 Skilljar 問答
+
+上一版只取 #skilljar-content，漏掉使用者想閱讀的頁尾 FAQ，即使展開仍不翻譯。實際 DOM 已確認問答是 #sj-custom-footer .faq-container，透過 checkbox 與 label 控制 article 的高度。
+
+content.js / collect 現在把這些 FAQ 加為補充範圍，與課程正文一起收集；仍由 allowed 過濾收合答案、隱藏區與表單。可見問題標題可翻，答案展開後再按開始即可補翻，既有正文不重複。沒有自動監看或在展開時立即翻譯。apply 把 .faq-title 的譯文放進標題本身，避免在 label 的 grid 裡多插一個欄位；答案譯文維持在收合容器內，會一起收合。
+
+操作：更新外掛並重新整理原網頁 → 展開想看的問答 → 按開始翻譯。若先翻課程後才展開問答，再按開始即可。不必先還原全文。若仍漏翻可先反白；除錯時核對 .faq-container 是否仍存在、答案是否已展開及祖先高度／overflow，不要移除表單與隱藏區保護。
+
+流程：readingRoot 選正文 → collect 合併已知 FAQ 範圍 → allowed 篩選當下可見文字 → 原引擎翻譯 → apply 放回原區域。新增別站 FAQ 時應限定網域與容器，沿用可見性判斷，不要把所有 footer 都當正文。要改標題位置就調 apply 的容器內插入條件，並檢查 label 點擊是否仍能切換。
+
+驗證：8 項核心、27 項瀏覽器測試通過；新增收合→展開→補翻→再收合→重開循環，確認不讀取隱藏答案、不重複正文、標題不新增 grid 欄位。實際站點結構已唯讀核對，翻譯流程測試為重建 DOM 與固定譯文，未宣稱使用者 Chrome 實機驗收完成。
+
+## 0.2.7：修正課程頁誤選收合 FAQ
+
+使用者回報 https://anthropic.skilljar.com/introduction-to-agent-skills 畫面有正文卻顯示沒有段落。已以瀏覽器唯讀檢查實際 DOM：課程文字位於 #skilljar-content／#dp-details，頁尾有多個高度為 0 的 FAQ article；舊 querySelector('main article,article,main,[role="main"]') 取 DOM 中第一個符合者，不代表依 selector 列表優先順序挑正文，因此誤選頁尾 FAQ。這是 0.2.6 正文辨識規則的回歸問題。
+
+修正：content.js 新增 readingRoot() 與 readableRoot()。Skilljar 優先 #skilljar-content；其他網站先檢查可讀的 main／role=main，再考慮 article；候選須有尺寸、可見且有可處理文字。找不到則回到 body，多個主區塊也回 body 以免只翻第一篇。body 回退仍保留表單／導覽／隱藏區保護。allowed() 另排除被零高度／零寬度 overflow:hidden 或 clip 完全裁掉的祖先，防止收合 FAQ 重新出現在回退結果裡。反白仍限制於明確選取範圍。
+
+資料流程：readingRoot 選容器 → allowed 過濾 → collect 分段並回報 alreadyTranslated → 原本引擎 → apply。panel.js 將「目前辨識範圍已翻譯」與「沒有讀到正文」分開提示；只有實際看見已插入的段落才回報前者。沒有新網路請求或權限變動。
+
+操作與 Debug：更新後重新載入外掛，再重新整理課程頁，確認 v0.2.7 後開始。若依然讀不到，先反白課程介紹並用反白翻譯，記下診斷與網址；開發時檢查 readingRoot 選中的容器，以及祖先的 display／visibility／opacity／overflow 和尺寸。不要用取消隱藏與表單保護來補救。舊頁已有 content.js 的 guard，重新載入外掛後不刷新原網頁仍會沿用舊程式。
+
+維護例：新增課程平台容器，將精確網域條件與容器加到 readingRoot 的候選中，並用 readableRoot 驗證；測試至少包含可見正文、收合 FAQ、隱藏行動版重複內容及反白。避免再用第一個 article 代表整個網站。
+
+驗證：實際頁面 DOM 已確認以上結構，另以重建結構驗證正文擷取、FAQ 排除與已翻譯狀態。8 項核心、26 項瀏覽器測試通過；測試使用模擬翻譯／擴充功能 API，尚未在使用者安裝的 Chrome 上完成新版課程翻譯驗收。前版 Wikipedia 輕量譯文改善保留。
+
+## 0.2.6：正文辨識與輕量譯文
+
+使用者實機截圖已確認 0.2.5 能翻譯 Wikipedia，完成 172 段；但目錄、外觀控制與資訊框也被處理，大片色塊與每段標籤造成擁擠。此版本聚焦閱讀排版，不宣稱模型用字品質已改善。
+
+- content.js / collect：整頁模式先選 Google 結果區、Wikipedia 的 #mw-content-text .mw-parser-output，或一般網站 article／main；找不到則退回 body。一般頁排除 nav、aside、footer 與導覽／輔助區角色；Wikipedia 再排除 infobox、navbox、編輯連結、參考資料等。正文標題、段落、列表與一般內容表格保留。
+- 反白模式仍從 body 取使用者選取的範圍，讓需要翻目錄／資訊框的人可以明確指定；原有表單、隱藏區與可編輯區的保護不變。
+- apply：移除綠色底框與每段品牌標籤，改為透明背景、細紫線與較小間距；字級、文字顏色取自原文區塊。移除 clear:both，避免中文被推到右側浮動資訊框下方。譯文仍是隔離樣式的純文字，不執行 HTML。
+
+資料流程：範圍選擇 → collect 選正文容器／排除介面 → 回傳段落 → 原本本機翻譯引擎 → apply 在原段落旁插入輕量中文。沒有修改模型、資料傳送路徑或權限。
+
+更新：重新載入外掛後必須重新整理原網頁，再開清讀確認 v0.2.6，使用「文章正文（自動辨識）」開始。已注入的 content.js 有重複載入保護，只重載外掛不會替換舊網頁裡的版本。若漏翻特定文字，先反白再翻；若全無段落，檢查網站主內容容器與排除規則。已翻內容可還原或重新整理移除。
+
+維護例：新增網站時，在 collect 的 root 選擇加入精確容器，保留 body 退路與 selection 分支；不要把新網站的 class 排除套到所有網站。想調譯文間距／細線則改 apply 的 host.style 與 Shadow DOM style；不要改外掛側欄 playful.css，因為網頁譯文使用獨立樣式。article/main 自動辨識可能漏掉非標準網站或多篇文章，反白是暫時補救；短標題及專有名詞仍可能誤譯。
+
+驗證：8 項核心與 24 項瀏覽器測試通過。新增 Wikipedia 結構測試，確認介面與參考資料排除、反白可選側欄、無底框／重複標籤且不落到浮動資訊框下方；已檢視測試頁截圖。新版擷取／排版使用模擬 Wikipedia 結構與固定譯文，尚未在使用者的真實頁面驗收；0.2.5 的實機成功由使用者截圖確認。
+
+## 0.2.5：網頁存取失敗的修正與補救流程
+
+使用者在英文 Wikipedia 收到 page-read / PageAccessError。程式檢查確認兩處需要修正：原本 activeTab() 將 Chrome 未提供的 tab.url 當成不支援的頁面；另外背景只使用自動切換側欄，沒有明確的 action.onClicked 啟動路徑。不能僅憑舊訊息斷定使用者當時是哪一處失敗。
+
+- background.js 改為關閉 openPanelOnActionClick 自動切換，於 chrome.action.onClicked 直接呼叫 sidePanel.open（不在 await 之後），以工具列操作啟動。重複點工具列是開啟側欄，不再切換關閉。
+- panel.js / activeTab() 只對已知非 http(s) URL 拒絕；URL 缺省時仍依 tab.id 嘗試 inject，由 Chrome 執行真正的權限檢查。沒有分頁、受限頁面、注入失敗分別顯示不同診斷。
+- 注入失敗顯示「允許此網站」。按鈕呼叫 permissions.addHostAccessRequest({tabId})，由 Chrome 顯示目前網站的授權請求；送出請求不代表授權成功，也不會自動開始翻譯。
+- manifest 新增 http／https 的 optional_host_permissions（可選權限範圍），仍沒有必要 host_permissions、tabs、Cookie 或歷史權限。程式不呼叫所有網站的 permissions.request；使用者在 Chrome 確認後，該網站會取得持續授權。可於 Chrome → 擴充功能 → 清讀詳細資料 → 網站存取權撤回。CSP 連線仍只允許本機助手。
+
+操作：關閉側欄 → chrome://extensions 重新載入清讀 → 重新整理 Wikipedia → 直接點工具列清讀圖示 → 確認 v0.2.5 → 開始翻譯。若仍顯示讀取失敗，按「允許此網站」，開啟 Chrome 工具列拼圖選單並允許清讀存取目前網站，再按開始。此步驟是 Chrome 的網站權限確認，不需要更換翻譯模型。
+
+資料流程：工具列 action → activeTab 臨時授權／sidePanel.open → panel.start → tabs.query 取 ID → scripting.executeScript 注入 content.js → collect → 本機引擎 translate → apply。側欄留著而跨網站導覽時，臨時授權可能失效；可重新點工具列，或由使用者選擇持續授權該網站。網站授權請求只傳 tabId 給 Chrome，不傳文章、不記錄網址，也不自動擷取網站內容。
+
+Debug：PageMissingError 表示找不到分頁；PageRestrictedError 表示已知不支援協定；PageAccessError 表示注入被拒絕／失敗（也可能是分頁導覽競態，不能斷言一定缺權限）。一般網站可用上面的授權補救；Chrome 設定頁與瀏覽器禁止注入的頁面無法藉此繞過限制。授權後仍失敗時核對 v0.2.5、外掛副本、Chrome 的網站存取設定與最新診斷；不要再僅依網址是否存在判斷頁面可讀。回復時可先撤回網站權限，再停用新版。
+
+維護例：新增頁面限制時修改 activeTab 的協定檢查，保留「URL 缺省仍可嘗試注入」分支；改背景啟動時不要在 sidePanel.open 前加非同步等待，避免失去使用者操作資格。權限相關修改要同步 manifest、panel 的授權說明、core 錯誤及安全測試。
+
+驗證新增 URL 被隱藏仍嘗試注入、請求只指定目前 tabId、等待授權不自動收集、受限頁不注入，以及工具列直接開側欄。8 項核心與 22 項瀏覽器流程測試；瀏覽器測試模擬 Chrome 擴充功能／翻譯 API，不代表已在使用者 Chrome 確認授權彈出與 Wikipedia 翻譯成功。
+
+依據：[Chrome activeTab](https://developer.chrome.com/docs/extensions/develop/concepts/activeTab)、[Tabs 權限與敏感屬性](https://developer.chrome.com/docs/extensions/reference/api/tabs)、[網站授權請求 API](https://developer.chrome.com/docs/extensions/reference/api/permissions)。
+
+## 0.2.4：鮮活卡通介面
+
+側邊欄與 PDF 工作室採用奶油黃底、葡萄紫主按鈕、薄荷綠頁籤與粉紅 PDF 入口，搭配原創 SVG「小讀」書本角色、圓角卡片與按壓陰影。裝飾不依賴外部圖片或字型下載。功能與翻譯資料流程不變：按開始 → 取得段落 → 本機翻譯 → 插入譯文。
+
+樣式載入流程：panel.html／workspace.html 先載入原本版型 CSS，再載入 playful.css 覆蓋顏色與外觀；mascot.svg 為純靜態向量圖。保留深色文字、鍵盤焦點框與停用狀態，系統偏好減少動態時關閉按鈕過場。插圖為裝飾，alt 留白，不重複朗讀品牌。
+
+維護例：要把主色改成藍色，修改 playful.css 的 --accent 與 .primary 的背景、邊框和陰影，並檢查白字對比及 hover 狀態。版型改 panel.css／workspace.css；翻譯錯誤提示仍在 panel.js，不要用 CSS 隱藏錯誤。新版已同步版本為 0.2.4。
+
+排查：若仍看到舊綠色介面，先關閉側欄、重新載入擴充功能、再開清讀，確認版本 v0.2.4。若角色不顯示，確認同一資料夾有 mascot.svg，且 HTML 仍引用 playful.css／mascot.svg。要回復舊外觀可移除兩個 HTML 的 playful.css 引用，但應保留原本版型 CSS。這次是介面更新，不代表先前 Chrome 實機翻譯錯誤已解決。驗證沿用 7 項核心與 20 項瀏覽器測試，並檢視側邊欄及工作室截圖；測試中的翻譯 API 為模擬。
+
+## 0.2.3：縮短操作畫面、修正誤導的錯誤分類
+
+使用者回報「無法完成翻譯，確認頁面存取權／診斷代碼 Error」，並反映 UI 難用。已確認 core.js 原本把所有未知 Error 都歸為網頁權限，無法由這段訊息判斷實際根因。使用者提供的第二行也是舊提示，**可能載入舊副本，但尚未確認**；不能宣稱 Chrome 實機翻譯故障已解決。
+
+- 側邊欄改為「網頁翻譯／影片字幕／設定」，開始與狀態保持相鄰；PDF 與助手另開工作室。共同的引擎、來源語言保留在上方。
+- 右上角固定顯示完整 v0.2.3。若仍是舊長畫面或沒有版本號，先確認載入資料夾，避免測試另一份副本。
+- panel.js 的 showFailure 根據 job.stage 顯示 engine-create（建立引擎）、page-read（讀取）、engine-translate（翻譯）、page-apply（插入）。未知 Chrome 錯誤不再推測為權限問題；本機助手的配對／連線提示仍保留。
+- 不輸出 Chrome 原始錯誤訊息，避免例外內容意外帶入文章。診斷只有步驟、版本、引擎、語言與驗證過格式的錯誤名稱；無自動回傳。
+
+更新與最短排查：
+1. 關閉舊側邊欄，Chrome 開啟 `chrome://extensions`。若清讀已從本專案 extension 載入，按卡片重新載入；若不確定副本，先停用舊清讀，再用「載入未封裝項目」指定本專案 `extension` 資料夾。不要選整個專案或 ZIP。
+2. 重新整理要翻譯的 Google 搜尋頁，再點工具列新版清讀，確認右上角 **v0.2.3**。
+3. 按「測試引擎」。成功會顯示固定句子的實際譯文，再按開始翻譯。失敗則看步驟：engine-create 為引擎建立；engine-translate 為文字翻譯；page-read 才先查頁面權限／重新整理。若改本機模型，需啟動助手並完成配對，程式不自動切換。
+4. 回報完整狀態與診斷即可，不需要配對碼或文件內容。若更新後異常可停用新版、重載原版本；網頁重新整理會移除插入譯文，已存詞彙表不要任意清除。
+
+資料流程：開始 → 使用者點擊時直接 createTranslator，並行取得頁面 → collect 收集文字 → 等待引擎 → 分段 translate → 用語／詞彙表 → apply 插入。job.stage 在各步驟前設定；showFailure 只整理顯示，沒有改用網路服務。測試引擎直接用固定句子，不讀網頁。頁籤只控制可見區塊，不會自動取消工作；工作中的停止按鈕位於原功能頁籤。
+
+維護方式：panel.html 負責控制項與 data-page／data-view 對應；panel.css 新樣式以 .panel 為範圍，避免改壞 PDF 工作室；panel.js 尾端處理切換，showFailure 管理步驟提示；core.js 的 errorText 處理已知錯誤。例：要改「模型啟動失敗」提示，改 showFailure 的 labels／hint，保留 stage 代碼讓測試與回報可辨識，不要重新把未知 Error 當成權限錯誤。改版須同步 manifest、面板版本／診斷、INSTALL 與 package.json，並跑 `npm test`、`npm run test:browser`。
+
+驗證：7 項核心與 20 項瀏覽器流程測試通過；新增一般 Error 的建立／翻譯階段區分、敏感文字不外洩、頁籤切換與版本一致性測試，另檢視 360px 側欄截圖。翻譯與擴充功能 API 為模擬，**尚未在使用者已安裝的 Chrome 外掛完成實際翻譯驗收**。
+
+## 0.2.2：修正按開始後看不出結果的操作問題
+
+使用者回報 Google 搜尋結果頁按開始沒有中文。目前尚未取得使用者當時的引擎及錯誤狀態，**不能斷言已找出該次故障的唯一原因**。已在實際搜尋頁觀察到英文摘要與 rso 結果容器，並確認下列程式缺陷／操作障礙後修正：
+
+- 先前狀態放在影片區塊下方；現在開始按鈕與狀態提前，開始後捲到操作區。
+- 第一段翻譯失敗現在立即顯示錯誤，不再因只有一兩段而最後顯示「完成 0 段」。
+- 網頁存取失敗現在明確提示重新點工具列授權，不必先等模型下載完成。
+- 新開側邊欄一律預設網頁段落，不沿用舊的反白模式；使用者仍可手動選反白。
+- Google com／com.tw 搜尋頁的整頁模式先取 rso 搜尋結果，排除搜尋輸入與導覽；容器不存在則回到一般頁面擷取。反白模式不縮限搜尋區。
+- 新增「測試引擎」，只翻譯內建句子，不注入或讀取網頁。建構與每個翻譯片段超過兩分鐘會提示逾時並取消等待；本機助手已送入的推論仍可能運算到結束。
+
+資料流程：按開始 → 由使用者操作啟動模型建立，同時檢查當前分頁 → content.js collect 回傳段落 → 等待模型 → 逐段翻譯／套詞彙／apply。任何頁面錯誤都直接回報；晚到的模型會銷毀。測試引擎直接走 createTranslator → 固定句子 → 在 detail 顯示原文與結果，不走 collect。
+
+排查最短路徑：重新載入外掛並重新整理 Google 頁 → 點工具列清讀 → 按測試引擎。若未配對／下載失敗，先處理顯示的原因；若有中文，再按開始，回報狀態是讀取失敗、沒有段落、還是開始翻譯後失敗。不要用「引擎有回應」當作翻譯品質合格。
+
+維護：panel.html 決定狀態的位置；panel.js 的 createTranslator／waitForEngine／failure 管理生命週期與診斷；core.js 的 errorText 管理安全的頁面錯誤說明；content.js 的 collect 管理搜尋頁範圍。例：新增某個網站的擷取範圍時，應在 collect 保留一般頁面與反白模式退路，再增加排除表單和可見譯文的測試，不要全站移除隱藏／表單保護。
+
+本次通過 7 項核心與 19 項瀏覽器流程測試，新增少量段落全失敗、權限失敗不等模型、獨立引擎測試及搜尋結果擷取案例。這些使用模擬外掛／翻譯 API；實際讀取 Google DOM 不等於已在使用者 Chrome 成功翻譯，仍須以新版顯示結果確認。
+
+## 0.2.1 更新與維護交接
+
+專案原則：**任何新功能都不應偷偷把網頁、PDF 或音訊送到雲端。** 目前沒有雲端翻譯備援；引擎不支援就提示，使用者可以明確改選本機助手。下載公開模型／字型與傳送文件是不同資料流，離線與封包驗收仍須實測。
+
+- **語言組合狀態**：`panel.js/checkAvailability()` 在初始化及切換來源語言時呼叫 `Translator.availability()`，不支援或檢查失敗就停用開始按鈕。用遞增識別碼避免較慢的舊檢查覆蓋新選擇。`create()` 仍在按鈕操作時直接呼叫，保留使用者啟動條件；翻譯器位於側邊欄文件，沒有移到 Service Worker。
+- **閱讀位置優先**：`content.js/collect()` 先依畫面距離排序，再套 200 段／60,000 字元限制；每段翻譯前 `panel.js/start()` 透過 `qingread:prioritize` 重排未完成段落。捲動不會中斷正在翻譯的片段，會影響下一段。這次未納入批次的段落仍需再按開始，並非無上限背景翻譯。
+- **自訂詞彙表**：`core.js/parseGlossary()` 驗證格式，`applyGlossary()` 在譯文上依字面、區分大小寫、長詞優先、單次替換，不把輸入當正規表示式執行。最多 100 組、每側 80 字元。套用順序為模型譯文 → 選用的五組台灣用語 → 自訂表 → 純文字顯示。網頁和字幕各在開始時保留規則快照，避免中途修改造成前後不一致。
+
+詞彙表使用方式：展開側邊欄「自訂譯文詞彙表」，輸入 `內存 => 記憶體` 並儲存，再開始翻譯。這是**譯文替換**，不是保證模型按英文術語指定翻譯；不會重寫語句，也不套用於 PDF 或單字解釋。若台灣用語已先把「軟件」改成「軟體」，自訂表應以「軟體」為來源詞。要清除就留白再儲存；舊網頁譯文須先還原再重翻。
+
+排錯：開始按鈕停用時先看「引擎狀態」，重選來源語言再檢查，不必先重裝。`downloadable` 是 Chrome 回報的可準備狀態，因隱私設計，不一定代表尚未下載；不能據此判定離線失敗。詞彙未改時先確認已儲存、大小寫與模型實際輸出相符，再還原重翻；錯誤格式不會覆寫原本已存的規則。錯誤替換可清空詞彙表後還原重翻。
+
+維護例：要調整「先翻哪一段」，改 `content.js/distance()`；排序需同時適用初次 collect 與後續 prioritize，並測試捲到第 220 段仍先處理當前畫面，避免 200 段上限先截斷閱讀處。要增加詞彙上限，修改 `core.js/parseGlossary()`、panel.html 的輸入上限及提示，再執行 `npm test` 和 `npm run test:browser`。
+
+## 六項實機驗收（尚未全部完成）
+
+以下與模擬測試分開記錄，不因測試通過而自動打勾。請使用人工或公開文章，記下 Chrome 版本、來源語言、引擎、日期與結果。
+
+- [ ] 英文 → 繁中：`Do not delete the backup. The budget is USD 1,250.50.` 檢查否定、金額與幣別。
+- [ ] 日文 → 繁中：`バックアップを削除しないでください。締め切りは金曜日です。` 檢查否定與星期。
+- [ ] 韓文 → 繁中：`백업을 삭제하지 마세요. 마감일은 금요일입니다.` 檢查否定與星期。
+- [ ] 台灣用語：同一段先關閉用語與自訂表，看模型原譯，再逐一啟用；不能用詞彙替換掩蓋漏譯或理解錯誤。
+- [ ] 整頁與排版：測列表、表格、連結、行內粗體及長頁；捲到中後段再開始，確認優先翻譯閱讀處，還原後原內容仍完整。
+- [ ] 真正斷網：先以每個語言組合完成一次短文翻譯，再停止工作、斷開 Wi-Fi／網路線，用已開啟頁面的一段**之前沒翻過**的文字重新建立翻譯器測試；測後恢復網路。離線成功與「沒有外傳」仍是不同證據，另需在線檢查外掛及助手的連線目的地與請求內容。
+
+網路檢查須區分本機 127.0.0.1 的助手請求、原網站自己的流量、Chrome 模型下載及第三方套件資源檢查。DevTools 的模擬 Offline 或只觀察側邊欄請求不足以證明整個瀏覽器／助手完全離線；測試紀錄可能包含文字與配對碼，不應直接公開。
+
+## 功能狀態
+
+| 需求 | 本版實作與界線 |
+|---|---|
+| PDF 繁中、排版、下載 | 本機 BabelDOC＋Ollama，產生中文與雙語 PDF；一般文字 PDF 已實測。複雜公式、多欄論文與長書仍需驗收，不能保證原排版完全一致 |
+| 掃描 PDF | RapidOCR 加文字圖層再翻譯；目前限英文白底黑字，短標籤與純數字保留圖像，非通用漫畫／手寫辨識 |
+| 網頁、反白、還原 | Chrome 語言包或本機模型可選。按開始才擷取；動態新增內容需再按開始 |
+| 貼上文字翻譯 | 側欄「文字翻譯」頁籤，沿用所選引擎與語言；每次 6,000 字元，不保存歷史；可切換分頁，關閉或隱藏側欄會停止 |
+| 語言辨識 | 按「辨識目前網頁語言」自動判斷，再開始翻譯。需 Chrome LanguageDetector；非背景監看所有網站 |
+| 滑過單字 | 啟用後按住 Alt 滑過英文單字，本機模型提供詞義與例句；非權威字典，答案可能有誤 |
+| 現有影片字幕 | 讀取 YouTube 已顯示字幕或 video 的啟用文字軌，疊加雙語；跨來源／自訂播放器、保護內容不保證支援 |
+| 無字幕影片 | 分頁音訊每 4 秒送本機 Whisper small，再由所選引擎翻譯。有延遲，忙碌時略過片段並提示，切段邊界可能漏字。尚未完成實際網站擷取端到端驗收 |
+| 獨立圖片／螢幕 OCR | 第二階段，尚未實作；掃描 PDF 已先納入文件流程 |
+| 摘要、影片重點、術語庫、文件問答 | 第二階段，尚未實作；單字解釋不代表完整 AI 助手已完成 |
+
+## 你這台電腦怎麼開始
+
+本次已安裝 companion/.venv 與 PDF 資源，找到既有 Whisper small 快取與 Ollama 模型。使用你原有的 `hf.co/mradermacher/Llama-Breeze2-8B-Instruct-Text-GGUF:Q8_0` 實測，未再下載大型文字模型。
+
+1. 確認 Ollama 已啟動，雙擊 **companion/start.cmd**，保留助手視窗。
+2. Chrome 開啟 `chrome://extensions`，開啟開發人員模式，「載入未封裝項目」選 **extension** 資料夾；已載入者按重新載入。
+3. 點清讀 → **PDF 與助手設定**，貼上助手視窗的配對碼，允許本機連線並配對。
+4. 確認模型，按「使用這個模型」。PDF 先選 1–2 頁試用。
+5. 網頁／影片要回到原分頁，再點清讀圖示取得該網站臨時權限。網站換了，側邊欄仍開著不代表已授權新網站。
+6. PDF 工作可關閉畫面後繼續；網頁與字幕需保持側邊欄開啟。關閉助手則 PDF 中斷。
+
+瀏覽器重啟或外掛重新載入後需重新配對。配對碼不是付費 API 金鑰，是防止一般網頁任意呼叫助手的通行碼。
+
+## 親友首次安裝
+
+目前為 **Windows 安裝腳本版**，不是簽署的一鍵安裝程式或 Chrome 商店版。
+
+1. 使用桌面 Chrome 138 以上，功能支援仍以實機為準。
+2. 從 [Ollama 官方網站](https://ollama.com/download/windows) 安裝並啟動 Ollama，下載一個本機文字模型。助手會拒絕雲端代理模型。
+3. 解壓縮完整套件，雙擊 companion/install.cmd。它使用 uv 建立獨立 Python 3.12 環境與固定依賴；缺少 uv 時透過 winget 安裝，失敗則依畫面官方網址處理。**腳本不會替你完成 Ollama 安裝及模型選擇。**
+4. 啟動 start.cmd，載入外掛、配對、選模型。
+5. 文件工作室下載 PDF 資源與語音模型。需要網路，請預留數 GB 空間，文字模型另計。不能直接複製另一台電腦的 .venv 當作完成安裝。
+
+之後通常只需啟動 Ollama、start.cmd，再使用外掛。不需要修改 Windows 安全政策或開放區域網路埠。
+
+## 為什麼這樣設計
+
+Chrome 語言包容易使用，但不能獨力完成 PDF 排版重建與語音辨識。因此分工：Chrome／Ollama 翻譯、BabelDOC 排版、Whisper 語音、RapidOCR 掃描文字。親友各自在自己的電腦執行，不靠你的電腦當伺服器。
+
+文章與 PDF 可選品質較好的本機模型，影片字幕可改用較快的 Chrome 語言包。本次 Breeze2 短句冷啟動約 20 秒、暖機約 3 秒；Whisper small 辨識約 5.8 秒人工語音，含載入約 6.6 秒。這些是單機樣本，不是其他硬體／長文的效能保證。
+
+**BabelDOC 與沉浸式翻譯有關聯**，採 AGPL-3.0。本工具使用本機開源套件，不呼叫沉浸式翻譯線上服務。選擇它是為了現成排版能力，不表示上游已完成安全稽核或完全無網路行為。來源及授權見 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
+## Request / Data Flow
+
+### 網頁與單字
+
+```text
+工具列 → background.js 開啟 panel.html → panel.js / start()
+→ content.js / qingread:collect 擷取可見段落或反白
+→ core.js / splitText() 切塊
+→ Chrome Translator，或 local-client.js → POST /translate
+→ Companion.translate() → chat() → 本機 Ollama /api/chat
+→ OpenCC 轉繁中台灣詞彙 → qingread:apply → textContent 插入原頁
+```
+
+`documentId` 防止送到導向後的新文件；工作 ID 防止停止後的延遲回填；content.js 另檢查原始文字節點有沒有改變。上限每次 200 段／60,000 UTF-16 字元／25,000 文字節點，每塊 1,200 Unicode 字元。換引擎、語言或用語設定要先還原再重翻。
+
+文字翻譯：text.js 直接把貼上的文字交給同一個 createTranslator → splitText → 用語／詞彙表 → textarea 顯示，不經 content.js。
+
+單字：media-content.js 偵測 Alt＋停留 → video.js 輪詢 qingread:hover-read → POST /explain → 版本符合才顯示純文字提示框。排除表單與可編輯區。
+
+### PDF
+
+```text
+workspace.js 選檔 → POST /pdf（只送本機）
+→ Companion.start_pdf() 檢查格式、大小、頁數、語言、資源
+→ data/jobs/<ID>/input.pdf 與暫時 options.json
+→ run_pdf() 啟動 pdf_worker.py
+→ 掃描檔先 add_ocr_layer() → BabelDOC 排版／公式占位
+→ POST /v1/chat/completions → Companion.chat() → Ollama → OpenCC
+→ output/*.pdf → GET /jobs → GET /jobs/<ID>/files/<檔名> → 下載
+```
+
+相容的 `/v1/chat/completions` 格式是為串接排版引擎，目的地固定本機，**不代表呼叫 OpenAI 付費服務**。上限 64 MB／500 頁。一次只處理一個文件或資源下載工作。
+
+### 影片
+
+```text
+video.js → media-content.js 選主頁可見影片
+現有字幕：每 250ms 讀取 → 等待原文穩定／本次工作快取 → 翻譯 → 驗證相關性 → 保留閱讀時間後替換
+語音：background.js / qingread:capture 取得分頁音訊
+→ AudioContext 保持播放 → audio-worklet.js 混音、16kHz、4 秒一段
+→ POST /speech → validate_wav() → faster-whisper small（CPU int8）
+→ 所選翻譯器 → 雙語字幕；忙碌時新片段與過期結果略過
+```
+
+切換分頁、重載或隱藏側邊欄會關閉音訊軌、翻譯器與字幕。現有字幕換句時保留短暫閱讀時間，新版規則見上方「影片字幕舒適閱讀」；語音字幕最多顯示 8 秒。分頁擷取包含廣告與其他聲音。尚未做重疊切段、講者區分、字幕匯出與影片摘要。
+
+## 重要檔案
+
+| 檔案 | 角色 |
+|---|---|
+| extension/manifest.json | 版本、權限、連線安全政策 |
+| extension/panel.html、panel.css、panel.js | 側邊欄、網頁翻譯、引擎切換、辨識與取消 |
+| extension/text.js | 文字翻譯頁籤：貼上文字、切塊翻譯、停止、複製 |
+| extension/content.js、core.js | 擷取、插入、還原、切塊、五組可選用語 |
+| extension/local-client.js | 固定本機目的地、配對、HTTP 錯誤、翻譯器介面 |
+| extension/workspace.html、workspace.js、workspace.css | 配對、模型、資源、PDF、工作下載 |
+| extension/video.js、media-content.js、audio-worklet.js | 字幕工作、頁面疊字、滑過單字、音訊片段 |
+| extension/caption-state.js | 現有字幕穩定等待、持續補字上限與最新候選句緩衝 |
+| extension/background.js | 開側邊欄與取得指定分頁音訊 |
+| companion/app.py | HTTP 認證、模型、語音、工作管理與清除 |
+| companion/pdf_worker.py、prepare.py | 固定版 BabelDOC 轉接、OCR、資源準備 |
+| companion/requirements.txt、requirements-lock.txt | 直接依賴與完整固定版本，安裝使用 lock |
+| companion/install.cmd、start.cmd | Windows 安裝與啟動，非系統常駐服務 |
+| tests/ | 基本、瀏覽器流程、HTTP 邊界、真實引擎測試 |
+
+## 資料生命週期與權限
+
+- 網頁文字、音訊由程式在記憶體處理，不寫文章／錄音檔；作業系統交換檔另由系統管理。
+- PDF **會寫入磁碟**：data/jobs/<ID> 包含原檔、OCR、譯本、快取、工作追蹤檔。追蹤檔可能含全文，勿公開。每份文件快取獨立，清除工作一起刪除。
+- 完成／失敗工作可立即清除。約 24 小時未更新的工作目錄，在啟動、查詢或每 5 分鐘檢查時清除，進行中除外；助手關閉期間不能清除。一般刪除不是安全抹除。
+- 重啟可讀回完成工作，中斷工作標為失敗。配對碼在 data/config.json 與瀏覽器 storage.session，內容腳本拿不到。PDF 暫時 options.json 在結束刪除，異常關閉後啟動也移除。
+- storage.local 保存來源、範圍、引擎、用語設定及使用者自訂詞彙表；不保存文章。取消網頁工作不再插入結果；已送給 Ollama 的片段可能仍運算到結束。
+- 助手只綁定 127.0.0.1:8765，檢查 Host、Origin、隨機配對碼。翻譯目的地固定 127.0.0.1:11434，忽略 HTTP 代理，拒絕雲端代理模型。
+- 首次資源下載需網路；BabelDOC 可能檢查缺失資源。本工具未做作業系統層的網路封鎖，尚未完成封包／供應鏈稽核。
+- 必要權限為 activeTab、scripting、storage、sidePanel；可選本機連線、tabCapture，以及使用者確認後的單一網站存取權。Chrome 主機權限不能按埠限制，但 CSP 與實際請求固定 8765。
+- 不在安裝時授予所有網站常駐權限，不要求 Cookie、歷史；網站存取可由使用者透過 Chrome 確認持續授權並撤回。文字用 textContent 顯示，不執行模型回傳的 HTML。譯文在原頁面，不代表對原網站保密。
+
+## 壞掉時怎麼查
+
+先用短英文段落、1 頁人工 PDF 或公開影片重現，不要貼出配對碼／文件快取。
+
+| 症狀 | 排查順序 |
+|---|---|
+| 無法連線 | start.cmd 視窗 → 工作室重新檢查 → 配對碼。位址占用時關閉重複助手，不要任意終止不明程式 |
+| 401／配對失敗 | 瀏覽器或外掛曾重啟 → 重新配對，勿填到網站表單 |
+| Ollama 未連線／模型未選 | 啟動 Ollama → ollama list → 工作室選模型並儲存 |
+| 429／模型忙碌 | 停止其他翻譯，等目前片段完成；避免同時跑 PDF 與即時字幕 |
+| Chrome API 不可用 | 更新 Chrome；側邊欄右鍵檢查，Console 查 typeof globalThis.Translator；可手動選本機模型 |
+| 語言包下載／不支援 | 側邊欄查 await Translator.availability({sourceLanguage:'en',targetLanguage:'zh-Hant'})，確認磁碟、語言、瀏覽器政策，再由按鈕重試 |
+| 網頁擷取失敗 | 回原頁點工具列授權；內部頁、商店、跨來源框架不適用。舊譯文先還原 |
+| PDF 資源未準備 | 下載 PDF 排版資源，完成後重新檢查；下面指令可診斷純資源下載 |
+| 文件引擎失敗 | 先用 1 頁 → 短文模型測試 → result.json 安全錯誤類型 → 固定依賴。work 可能含全文，不要公開 |
+| 掃描字被遮住 | 核對英文白底黑字與掃描模式 → 看雙語本。彩色、手寫、極小字應保留原檔，不採用有問題的譯本 |
+| 影片沒字幕 | 開原字幕 → 確認主頁 video → 本機模型跟不上可改 Chrome。跨來源課程播放器尚未驗收 |
+| 語音失敗／延遲 | 準備語音模型、重新點工具列、允許分頁擷取、保持側邊欄；看略過提示，改快的翻譯引擎／降低播放速度 |
+
+安全診斷：
+
+```powershell
+ollama list
+uv pip check --python companion/.venv/Scripts/python.exe
+.\companion\.venv\Scripts\python.exe companion/prepare.py pdf-assets companion/data
+```
+
+中斷點：panel.js/start() 的 collect 回傳、video.js/display() 版本檢查、app.py/start_pdf()、run_pdf()、pdf_worker.py/run()。細部排查只用人工文件，避免將全文寫進公開紀錄。
+
+回復：停止字幕／翻譯，還原或重整網頁，關閉助手，在工作列表清除指定工作。改程式後重新載入外掛、重整測試頁、重啟助手，避免新舊版本混用。
+
+## 如何自行修改
+
+**例：想讓翻譯更像台灣技術文件。** 修改 app.py/translate() 的 system instruction，加入具體用語規則，用同一份含數字、否定句、專有名稱的短文比較。PDF 另有 pdf_worker.py 的 custom-system-prompt，需同步修改。OpenCC 只改字詞，不能修正理解錯誤。
+
+**例：新增義大利文。** 同步 core.js/LANGUAGES、panel.html 與 workspace.html 選單、app.py/LANGUAGES，分別實測 Chrome／Whisper／BabelDOC。選單出現不代表引擎都支援。
+
+**例：語音片段改 6 秒。** 同步 audio-worklet.js 收集長度與輸出長度，保留 16kHz，更新面板提示；評估 video.js 的 15 秒過期門檻及 app.py/validate_wav() 的 12 秒上限。長片段上下文較完整，但字幕更慢。
+
+修改五組用語需同步 core.js/TERMS 與 localize() 比對式。改上限需同步 core.js、content.js、畫面及測試。BabelDOC 快取轉接依賴固定版本，configure_assets() 必須在匯入翻譯快取前指定每工作目錄；升版要驗證全文沒有跑到共用或家目錄，不能只改套件版本。
+
+## 驗證與未驗證
+
+### 2026-10-29 程式 review 與回歸測試
+
+本輪以目前原始碼為範圍（資料夾沒有 Git 紀錄，無法判斷相對某個 commit 的差異），檢查文字擷取、翻譯、摘要串流、本機連線／配對、PDF 與下載工作的取消及回復流程。排除 build、releases、模型與使用者資料。以下問題由新增測試先重現，再修正；不是宣稱曾在實際模型中觀察到每種異常。
+
+| 發現與影響 | 修正後行為 |
+| --- | --- |
+| 一般翻譯／JSON 摘要遇到未閉合的 `<think>`，會把思考文字當答案；串流若標籤前已有文字，可能將不完整結果當成功並快取 | `visible_model_text()` 統一檢查；完整回應仍有未閉合標籤時回報 `MODEL_INCOMPLETE`，不產生完成事件、不寫入摘要快取 |
+| 串流結束仍把 `<`、`<t`、`<thi` 等尾端字串當未收完的標籤，靜默刪除 | 只在等待後續資料時暫藏可能的標籤前綴；明確收到完成訊號後保留一般字串 |
+| 模型回傳非物件、`message: null` 或非文字內容，直接發生型別錯誤，顯示不明內部錯誤 | `model_content()` 先驗證格式，回報 `MODEL_OUTPUT`；失敗後仍釋放模型鎖，下一次工作可重試。傳輸層收到非物件串流則回報 `MODEL_UNAVAILABLE` |
+
+資料流：`POST /translate`、`/explain`、`/summarize` 或 PDF 的 `/v1/chat/completions` → `Companion.chat()`／`stream_summary()` → 本機 Ollama → `model_content()` 驗證欄位 → `visible_model_text()` 處理思考標籤與完成狀態 → OpenCC 轉繁中 → JSON 或逐行 JSON 事件 → `extension/local-client.js` → 畫面。串流已送出 HTTP 200 後發生錯誤時，透過事件中的 `error` 回報，不能只靠 HTTP 狀態判定成功。
+
+這裡的「模型鎖」指一次只讓一份工作使用模型的控制機制；失敗後若忘記釋放，後續使用者就會一直看到忙碌。完整、非截斷摘要才可快取。遇到未閉合標籤選擇回報失敗，是因為無法確定剩下文字是否為真正答案；不猜測模型已完成。
+
+本輪結果：
+
+| 類別 | 結果 | 範圍 |
+| --- | ---: | --- |
+| JavaScript 單元測試 | 19 / 19 | 原 9 項，加 `tests/local-client.test.cjs` 10 項：配對儲存時機、固定本機位址、跨封包中文／emoji、中斷、取消、錯誤、舊 JSON 回應與資源釋放 |
+| Python 測試 | 34 / 34 | 原 27 項，加 `tests/test_model_output.py` 7 項；涵蓋模型回應、錯誤後解鎖、摘要快取、配對、本機 HTTP 與工作管理。包含單元及本機 HTTP 整合測試 |
+| 瀏覽器流程測試 | 65 / 65 | 使用這台電腦的 Chrome；外掛 API、模型與網站內容以模擬資料驗證 |
+
+共新增 17 項測試。`package.json` 的 `npm test` 已納入新的 JavaScript 測試；Python 必須使用 discovery（自動尋找 `test_*.py`），只跑 `test_companion.py` 會漏掉配對、串流與本輪測試。本輪沒有呼叫真實 Ollama 推論、下載模型、重新打包或重新驗收真實 PDF／語音品質；也未替換正在執行中的助手。修改生效需自行在工作結束後重啟助手。
+
+排錯順序：先用人工短句重現 → 查看錯誤代碼或串流的最後一筆事件 → 跑 `tests/test_model_output.py` → 再跑完整 Python 測試。`MODEL_INCOMPLETE` 表示答案未完成，可縮短原文或換模型；`MODEL_OUTPUT` 表示回傳欄位／文字格式不符。若出現 `MODEL_UNAVAILABLE`，先確認 Ollama 與助手仍在執行。不要將實際原文、配對碼或模型完整回應貼入公開紀錄。遇到 `WinError 10013` 或暫存目錄拒絕存取，先確認執行環境允許測試連接自己建立的 127.0.0.1 服務及寫入暫存目錄；本輪首跑因此失敗，取得執行權限後完整通過，並非產品缺陷。
+
+維護範例：若日後模型改用另一種思考標籤，集中修改 `companion/app.py` 的 `visible_model_text()`，同時測「完整標籤」「標籤分成多個封包」「未閉合卻收到完成訊號」「一般小於符號」。先在 `test_model_output.py` 加人工回應案例，不要只改一般翻譯而漏掉摘要串流。前端解析或取消規則改動則補 `local-client.test.cjs`，確認停止後不接受晚到的完成事件，並重新跑瀏覽器流程。
+
+### 先前實機驗證與仍待驗收的範圍
+
+歷次已驗證：真實 Ollama Breeze2、Whisper small、一般 PDF、英文掃描 PDF 已執行；人工 1 頁樣本已渲染檢查圖表、數字、簡單公式。固定依賴曾通過 uv pip check，已處理 bitstring 5 不相容問題。這些是先前紀錄，未在本輪重跑。瀏覽器流程的外掛／翻譯 API 使用模擬物件，**不等於真實網站端到端**。
+
+未驗證：正常 Chrome 工具列／語言包／分頁音訊完整流程、長影片同步、各課程網站、數百頁文件、複雜公式、親友硬體、全新 Windows 安裝、完全斷網、封包與供應鏈稽核。外掛載入檢查見 test-results/extension-smoke.json；loaded=false 時不可當成已驗證。
+
+維護者指令：
+
+```powershell
+npm test
+# 首次 npm install；或環境既有 Playwright 1.64.1
+$env:CHROME_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+npm run test:browser
+.\companion\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+# 只重現本輪模型輸出邊界（不需啟動 Ollama）
+.\companion\.venv\Scripts\python.exe tests/test_model_output.py -v
+```
+
+若 PowerShell 阻擋 npm.ps1，可將上述 npm 換成 npm.cmd，不需降低系統安全政策。
+
+真實 PDF 測試：tests/create_sample_pdf.py 需 reportlab（僅測試依賴）；tests/integration_local.py --pdf 使用人工樣本，並選既有 Breeze2 或第一個本機模型；加 --scan 測 OCR。語音測試讀人工 WAV。測試工作可在工作室清除。
+
+打包 scripts/package.ps1 產生外掛及完整原始碼套件，採明列檔案，不含 .venv、模型、配對碼、文件、錄音、瀏覽器設定檔。系統禁止 .ps1 時勿降低安全政策，可自行壓縮 extension，助手另附 .py、.cmd、requirements 與授權檔。商店發布、簽署、正式更新機制尚未完成。
+
+## 技術依據
+
+- [Chrome Translator](https://developer.chrome.com/docs/ai/translator-api)、[語言辨識](https://developer.chrome.com/docs/ai/language-detection)、[tabCapture](https://developer.chrome.com/docs/extensions/reference/api/tabCapture)
+- [BabelDOC](https://github.com/funstory-ai/BabelDOC)、[支援語言](https://funstory-ai.github.io/BabelDOC/supported_languages/)
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper)、[RapidOCR](https://github.com/RapidAI/RapidOCR)、[OpenCC](https://github.com/BYVoid/OpenCC)
+- [Ollama API](https://docs.ollama.com/api/introduction)、[uv 安裝](https://docs.astral.sh/uv/getting-started/installation/)

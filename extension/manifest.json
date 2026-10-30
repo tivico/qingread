@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "清讀 · 本機雙語翻譯",
+  "version": "0.3.8",
+  "description": "手動啟動、在裝置上翻譯的繁體中文雙語閱讀工具。無帳號、無雲端翻譯後端。",
+  "minimum_chrome_version": "138",
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel"],
+  "optional_permissions": ["tabCapture"],
+  "optional_host_permissions": ["http://127.0.0.1/*", "https://*/*", "http://*/*"],
+  "action": { "default_title": "開啟清讀翻譯" },
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "panel.html" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self' http://127.0.0.1:8765; base-uri 'none'"
+  }
+}

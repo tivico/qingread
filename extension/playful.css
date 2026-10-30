@@ -1,0 +1,40 @@
+/* Shared illustration theme. Functional layout stays in panel/workspace.css. */
+.panel,.studio{--ink:#30305b;--muted:#66617c;--accent:#6940cd;--outline:#d6c7ec;--pink:#ff7097;--mint:#a5edda;--sun:#ffe285;color:var(--ink);background-color:#fff8eb;background-image:radial-gradient(#e9dcca 1px,transparent 1px);background-size:16px 16px}
+.panel header,.studio header{background:#fff0b9;border-bottom:2px solid #30305b;gap:10px;padding:12px 16px}
+.mascot{flex:none;object-fit:contain;filter:drop-shadow(0 3px 0 #e6c880)}
+.panel h1,.studio h1{color:var(--ink);font-weight:850;letter-spacing:2px}
+.panel header p,.studio header p{color:#625338;line-height:1.6}
+.panel .badge{background:white;border:1.5px solid var(--ink);color:var(--ink);box-shadow:2px 2px 0 var(--ink);padding:5px 7px}
+.panel nav{background:#fffaf1;border-bottom:0;padding:10px 12px;gap:7px}
+.panel nav button{border:1.5px solid transparent;border-radius:14px;color:var(--ink);font-weight:650}
+.panel nav button[aria-pressed=true]{background:var(--mint);color:var(--ink);border-color:var(--ink);box-shadow:2px 3px 0 var(--ink)}
+.panel nav button[data-view=video][aria-pressed=true]{background:#ffd0e2}
+.panel nav button[data-view=settings][aria-pressed=true]{background:#e2d4ff}
+.panel main{padding-top:6px;gap:14px}
+.panel .card,.studio .card{border:1.5px solid var(--outline);border-radius:20px;background:#fff;box-shadow:3px 4px 0 #e9ddf4}
+.panel .engine-card{border-top:5px solid #aa8bf1}
+.panel label,.studio label{color:var(--ink)}
+.panel select,.studio select,.studio input:not([type=checkbox]),.panel textarea{border:1.5px solid var(--outline);border-radius:12px;background:#fffcff;color:var(--ink)}
+.panel .destination{border-color:#dfd3ed}
+.panel .destination strong{color:#6740b3;background:#f1e9ff;border-radius:8px;padding:5px 8px;width:fit-content}
+.panel button,.studio button{border-radius:12px;border-color:var(--outline);color:var(--ink);transition:background-color .15s,transform .15s,box-shadow .15s}
+.panel button:not(:disabled):hover,.studio button:not(:disabled):hover{background:#f2eaff}
+.panel .primary,.studio .primary{background:#6940cd;color:#fff;border:2px solid #3a246d;border-radius:15px;box-shadow:0 4px 0 #3a246d;font-weight:750}
+.panel .primary:not(:disabled):hover,.studio .primary:not(:disabled):hover{background:#5730b8;transform:translateY(-1px)}
+.panel .primary:not(:disabled):active,.studio .primary:not(:disabled):active{transform:translateY(3px);box-shadow:0 1px 0 #3a246d}
+.panel button:disabled,.studio button:disabled{opacity:.55}
+.panel .actions{margin-top:14px}
+.panel .status-card,.studio .status-card{background:#fff6d7;border:1px solid #e7d498;border-radius:14px;color:var(--ink)}
+.panel .hint,.studio .hint{color:var(--muted)}
+.panel progress,.studio progress{accent-color:#8251d6}
+.panel .workspace-link{background:#ffdeea;border:1.5px solid #d99ab0;color:#68374e;text-align:center;padding:10px;border-radius:14px;font-weight:650}
+.panel footer,.studio footer{color:#71647d}
+.panel :is(button,select,textarea,summary,input):focus-visible,.studio :is(button,select,textarea,summary,input):focus-visible{outline:3px solid #b62973;outline-offset:3px}
+.studio .eyebrow{color:#6940cd}.studio header .mascot{width:72px;height:72px}
+@media(prefers-reduced-motion:reduce){.panel button,.studio button{transition:none}.panel .primary:not(:disabled):hover,.studio .primary:not(:disabled):hover{transform:none}}
+.panel,.studio{min-height:100vh}
+
+.panel nav{overflow-x:auto}.panel nav button{flex:1 0 auto;white-space:nowrap}
+.panel .text-panes{display:grid;gap:12px}.panel .text-panes textarea{line-height:1.7;font-size:14px;min-height:150px}
+.panel #text-output{background:#f6f0ff}.panel #text-count{margin:4px 0 0}
+@media(min-width:620px){.panel .text-panes{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}

@@ -1,0 +1,14 @@
+{
+  "name": "qingread-local-translator",
+  "version": "0.3.8",
+  "private": true,
+  "description": "Local-first Chrome bilingual reading extension",
+  "scripts": {
+    "test": "node --test tests/core.test.cjs tests/local-client.test.cjs tests/caption-state.test.cjs",
+    "test:browser": "node --test tests/browser.test.cjs tests/video-comfort.test.cjs",
+    "test:extension": "node tests/extension-smoke.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1"
+  }
+}

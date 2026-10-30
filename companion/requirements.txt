@@ -1,0 +1,10 @@
+babeldoc==0.6.4
+faster-whisper==1.2.1
+opencc-python-reimplemented==0.1.7
+rapidocr-onnxruntime==1.4.4
+bitstring==4.3.1
+pymupdf==1.26.7
+peewee==3.18.3
+numpy==2.2.6
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86

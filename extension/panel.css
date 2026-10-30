@@ -1,0 +1,37 @@
+:root{color-scheme:light;--ink:#183b35;--muted:#61736d;--accent:#246f5e;font-family:"Segoe UI","Microsoft JhengHei",sans-serif;background:#f4f5ef;color:var(--ink)}
+.check{display:flex;align-items:center;gap:6px;margin-top:17px;font-weight:400}.check input{accent-color:var(--accent)}
+#detail{white-space:pre-line}.status-card{scroll-margin-top:12px}
+textarea{width:100%;resize:vertical;font-family:inherit;font-size:14px;line-height:1.6;padding:9px;border:1px solid #d4dfd5;border-radius:8px;color:var(--ink)}textarea:focus-visible{outline:3px solid #df9e45;outline-offset:3px}.card details{margin:14px 0}
+*{box-sizing:border-box}body{margin:0;min-width:280px}header{display:flex;align-items:center;gap:10px;padding:23px 20px;border-bottom:1px solid #dce2d8}.mark{background:var(--ink);color:#fff;border-radius:12px;padding:10px;font-size:21px}h1{margin:0;font-size:22px;letter-spacing:3px}header p{font-size:11px;margin:4px 0;color:var(--muted)}.badge{font-size:10px;margin-left:auto;border:1px solid #c6d9ca;padding:5px 8px;border-radius:20px;white-space:nowrap}main{padding:25px 20px}.eyebrow{font-size:11px;letter-spacing:1px;color:var(--accent)}h2{font-size:29px;line-height:1.5;font-weight:650;margin:12px 0}.intro>p{font-size:13px;color:var(--muted);line-height:1.8;margin-bottom:24px}.card{background:white;padding:20px;border:1px solid #e0e6da;border-radius:16px;box-shadow:0 6px 22px #24443506}label{display:block;font-size:12px;font-weight:600;margin:0 0 9px}select{width:100%;border:1px solid #d4dfd5;background:#fafbf8;border-radius:8px;padding:11px;font:inherit;font-size:14px;color:var(--ink)}.destination{display:flex;justify-content:space-between;padding:17px 0 22px;font-size:13px}.destination span{color:var(--muted)}.hint{font-size:12px;line-height:1.8;color:var(--muted)}button{font:inherit;cursor:pointer;border:1px solid #d4dfd5;border-radius:9px;background:#fff;padding:11px;color:var(--ink)}button:disabled{opacity:.5;cursor:default}.primary{width:100%;background:var(--accent);color:#fff;border:0;font-weight:600;margin-top:7px;padding:14px}.actions{display:flex;gap:10px;margin-top:10px}.actions button{flex:1;font-size:12px}.status-card{padding:12px 3px}#status{font-size:14px;line-height:1.7}progress{width:100%;height:6px;accent-color:var(--accent)}details{border-top:1px solid #dce2d8;padding-top:18px;font-size:12px;line-height:1.9;color:var(--muted)}summary{cursor:pointer;color:var(--ink)}footer{font-size:11px;color:#7d8a80;padding:0 20px 24px}button:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #df9e45;outline-offset:3px}
+
+/* Side-panel layout only; the document workspace keeps its existing styling. */
+.panel{background:#f5f7f8;color:#243834}
+.panel [hidden]{display:none!important}
+.panel header{padding:16px;gap:10px;background:#fff;border:0}
+.panel .mark{font-size:18px;padding:8px;border-radius:10px}
+.panel h1{font-size:20px}.panel header p{font-size:11px}
+.panel nav{display:flex;gap:4px;padding:6px 12px;background:#fff;border-bottom:1px solid #e3e9e6}
+.panel nav button{flex:1;border:0;border-radius:8px;font-size:13px;padding:10px 4px;background:transparent}
+.panel nav button[aria-pressed=true]{background:#e4f1eb;color:#185f49;font-weight:700}
+.panel main{padding:14px;display:grid;gap:12px}
+.panel .card{padding:16px;border-radius:12px;box-shadow:none}
+.panel .engine-card{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;align-items:center}
+.panel .engine-card label{margin:0;font-size:12px}
+.panel #engine{grid-column:1/-1;grid-row:2}
+.panel #engine-status{grid-column:1/-1;margin:0 0 4px;font-size:11px;line-height:1.6}
+.panel label[for=source]{grid-column:1;grid-row:4}
+.panel #source{grid-column:1;grid-row:5}
+.panel .destination{grid-column:2;grid-row:4/6;display:grid;gap:8px;padding:0 0 0 12px;border-left:1px solid #e3e9e6;font-size:13px}
+.panel select{padding:9px;font-size:13px;background:white}
+.panel .primary{margin-top:12px;font-size:15px;padding:13px}
+.panel .actions{gap:6px}.panel .actions button{padding:9px 4px}
+.panel .status-card{margin-top:12px;background:#f1f6f3;border-radius:8px;padding:12px}
+.panel #status{margin:0 0 8px;font-size:13px;font-weight:600}
+.panel #detail{margin:8px 0 0;overflow-wrap:anywhere;font-size:12px;line-height:1.65}
+.panel h2{font-size:18px;margin:0 0 16px}
+.panel footer{padding:0 14px 16px;font-size:10px;text-align:center}
+.panel .workspace-link{border:0;background:transparent;font-size:12px;text-align:left;padding:5px 2px;color:#246f5e}
+.panel .check{margin-top:14px}.panel button:focus-visible{outline-offset:1px}
+.panel #summary-output{margin-top:16px;padding:16px;background:#f4faf7;border:1px solid #b8d3c6;border-radius:12px;scroll-margin-top:12px}
+.panel #summary-output h3{margin:0 0 10px;font-size:16px;color:var(--ink)}
+.panel #summary-result{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;color:var(--ink)}
