@@ -63,13 +63,14 @@ globalThis.QingReadLocal = {
     if(signal?.aborted)throw new DOMException('Stopped','AbortError');
     await chrome.storage.session.set({ companionToken: token });
   },
-  async request(path, { body, method, signal, token, binary = false, onProgress, managed = false, keepalive = false } = {}) {
+  async request(path, { body, method, signal, token, binary = false, onProgress, managed = false, keepalive = false, clientId } = {}) {
     if (managed) return this.runInference(path, {body,signal,token,onProgress});
     if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
     token ||= (await chrome.storage.session.get('companionToken')).companionToken;
     if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
     if (!token) throw new Error('請先開啟「PDF 與助手設定」完成配對。');
     const headers = { Authorization: `Bearer ${token}` };
+    if(clientId)headers['X-QingRead-Client']=clientId;
     if(onProgress)headers.Accept='application/x-ndjson';
     if (body && !(body instanceof Blob) && !(body instanceof ArrayBuffer)) {
       headers['Content-Type'] = 'application/json'; body = JSON.stringify(body);
@@ -88,7 +89,8 @@ globalThis.QingReadLocal = {
     }
     if (!response.ok) {
       const value = await response.json().catch(() => ({}));
-      throw new Error(value.message || `本機助手回應錯誤（${response.status}）。`);
+      const error=new Error(value.message || `本機助手回應錯誤（${response.status}）。`);
+      error.code=value.error;error.status=response.status;throw error;
     }
     if(onProgress && response.headers?.get('content-type')?.includes('application/x-ndjson')){
       const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
@@ -129,6 +131,9 @@ globalThis.QingReadLocal = {
     if (!kind) throw new Error('不支援此本機工作。');
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join('');
     const route = '/inference/' + id;
+    // Extension fetch may omit Origin on GET. Pin the same authenticated client
+    // identity across creation, polling and cancellation instead of trusting that header.
+    const clientId=chrome.runtime?.id;
     const deadline = AbortSignal.timeout(this.TIMEOUT_MS);
     const combined = signal ? AbortSignal.any([signal,deadline]) : deadline;
     const delay = (ms, currentSignal) => new Promise((resolve,reject) => {
@@ -143,10 +148,10 @@ globalThis.QingReadLocal = {
       cancellation ||= (async () => {
         const cleanupSignal = AbortSignal.timeout(3000);
         try {
-          let result = await this.request(route,{method:'DELETE',token,signal:cleanupSignal,keepalive:true});
+          let result = await this.request(route,{method:'DELETE',token,signal:cleanupSignal,keepalive:true,clientId});
           while (!['done','failed','cancelled'].includes(result.stage)) {
             await delay(100,cleanupSignal);
-            result = await this.request(route,{token,signal:cleanupSignal});
+            result = await this.request(route,{token,signal:cleanupSignal,clientId});
           }
           return result.error === 'CLEANUP_FAILED' ? 'unconfirmed' : result.stage;
         } catch { return 'unconfirmed'; }
@@ -156,7 +161,7 @@ globalThis.QingReadLocal = {
     try {
       if (combined.aborted) throw new DOMException('Stopped','AbortError');
       started = true;
-      let result = await this.request(route,{body:{...body,kind},token,signal:combined});
+      let result = await this.request(route,{body:{...body,kind},token,signal:combined,clientId});
       let previous = '';
       while (true) {
         if (combined.aborted) throw new DOMException('Stopped','AbortError');
@@ -171,7 +176,7 @@ globalThis.QingReadLocal = {
         const state = JSON.stringify([result.stage,result.text]);
         if(state!==previous){onProgress?.(result);previous=state;}
         await delay(250,combined);
-        result = await this.request(route,{token,signal:combined});
+        result = await this.request(route,{token,signal:combined,clientId});
       }
     } catch(error) {
       cancel();
@@ -182,6 +187,7 @@ globalThis.QingReadLocal = {
         throw stopped;
       }
       if(error.message==='找不到此功能。')throw new Error('請重新啟動新版助手，以使用可取消的本機翻譯。');
+      if(error.code==='NOT_FOUND'&&error.status===404)throw new Error('本機工作紀錄已失效，可能因助手重新啟動或結果過期。請重新開始；已顯示的部分內容尚未完整。');
       throw error;
     } finally { combined.removeEventListener('abort',cancel); }
   },

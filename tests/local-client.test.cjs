@@ -10,7 +10,7 @@ const token = 'a'.repeat(43);
 function client(fetch, saved = { companionToken: token }) {
   const context = {
     fetch, Blob, ArrayBuffer, TextDecoder, AbortController, AbortSignal, DOMException, crypto, setTimeout, clearTimeout,
-    chrome: { storage: { session: {
+    chrome: {runtime:{id:'a'.repeat(32)}, storage: { session: {
       get: async () => saved,
       setAccessLevel: async () => {},
       set: async value => Object.assign(saved, value)
@@ -200,6 +200,7 @@ test('managed work reports queue and generation stages before returning cached m
   assert.match(requests[0].url,/^http:\/\/127\.0\.0\.1:8765\/inference\/[0-9a-f]{32}$/);
   assert.deepEqual(JSON.parse(requests[0].options.body),{text:'原文',source:'en',kind:'translate'});
   assert.equal(requests.filter(r=>r.options.method==='POST').length,1);
+  assert.ok(requests.every(r=>r.options.headers['X-QingRead-Client']==='a'.repeat(32)));
 });
 
 test('managed cancellation confirms cleanup even when creation has not returned', async () => {
@@ -211,6 +212,7 @@ test('managed cancellation confirms cleanup even when creation has not returned'
       return new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new DOMException('Stopped','AbortError')),{once:true}));
     }
     assert.equal(url,route);
+    assert.equal(options.headers['X-QingRead-Client'],'a'.repeat(32));
     if(options.method==='DELETE'){deletes++;assert.equal(options.keepalive,true);return Promise.resolve(new Response('{"stage":"cancelling"}'));}
     polls++;return Promise.resolve(new Response('{"stage":"cancelled"}'));
   });
@@ -257,4 +259,15 @@ test('destroy after an unconfirmed cancellation never reports that the assistant
   const rejected=assert.rejects(pending,error=>error.name==='AbortError'&&error.cancelState==='unconfirmed');
   await started;controller.abort();await rejected;
   assert.match(local.cancellationText(await translator.destroy()),/尚未確認/);
+});
+
+test('a lost managed job gives a restart action and never resubmits the source automatically',async()=>{
+  let submissions=0,cleanup=0;
+  const local=client(async(_url,options)=>{
+    if(options.method==='POST'){submissions++;return new Response('{"stage":"reading"}');}
+    if(options.method==='DELETE'){cleanup++;return new Response('{"stage":"cancelled"}');}
+    return new Response('{"error":"NOT_FOUND","message":"找不到此本機工作。"}',{status:404});
+  });
+  await assert.rejects(local.request('/summarize',{body:{text:'Synthetic source'},managed:true}),error=>/工作紀錄已失效.*請重新開始/.test(error.message));
+  assert.equal(submissions,1);assert.equal(cleanup,1);
 });

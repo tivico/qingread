@@ -206,5 +206,33 @@ class InferenceTest(unittest.TestCase):
         client=(Path(__file__).resolve().parents[1]/'extension/local-client.js').read_text(encoding='utf-8')
         self.assertIn(f'TIMEOUT_MS: {TIMEOUT_SECONDS*1000}',client)
 
+    def test_terminal_record_survives_client_polling_budget(self):
+        result=self.run_text()
+        op=self.app.inference_jobs.jobs[result['id']]
+        with patch('inference.time.monotonic',return_value=op.finished+61):
+            self.assertEqual(self.app.inference_jobs.get(op.id,'local')['stage'],'done')
+        with patch('inference.time.monotonic',return_value=op.finished+TIMEOUT_SECONDS+1):
+            with self.assertRaises(InferenceError):self.app.inference_jobs.get(op.id,'local')
+
+    def test_http_extension_identity_survives_missing_get_origin_without_weakening_auth(self):
+        server=make_server(self.app,0);worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+        opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        identifier=uuid.uuid4().hex
+        def request(method,origin=None,client='a'*32,token=None):
+            headers={'Authorization':'Bearer '+(token or self.app.config['token']),'Content-Type':'application/json','X-QingRead-Client':client}
+            if origin:headers['Origin']=origin
+            data=json.dumps({'kind':'summarize','text':'Synthetic source'}).encode() if method=='POST' else None
+            req=urllib.request.Request(f'http://127.0.0.1:{server.server_port}/inference/{identifier}',data=data,method=method,headers=headers)
+            with opener.open(req,timeout=3) as response:return json.load(response)
+        try:
+            request('POST','chrome-extension://'+'a'*32)
+            self.assertEqual(wait_for(lambda:request('GET'))['stage'],'done')
+            self.assertEqual(request('DELETE')['stage'],'done')
+            for args,status in [({'client':'b'*32},404),({'origin':'chrome-extension://'+'b'*32},403),({'client':'invalid'},400),({'token':'wrong'},401),({'origin':'https://website.test'},403)]:
+                with self.subTest(args=args):
+                    with self.assertRaises(urllib.error.HTTPError) as error:request('GET',**args)
+                    self.assertEqual(error.exception.code,status)
+        finally:server.shutdown();server.server_close();worker.join()
+
 
 if __name__ == '__main__': unittest.main()

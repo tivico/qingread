@@ -119,7 +119,7 @@ class ModelStream:
 
 
 class InferenceJobs:
-    def __init__(self, semaphore, timeout=TIMEOUT_SECONDS, capacity=256, active_limit=8, retention=60):
+    def __init__(self, semaphore, timeout=TIMEOUT_SECONDS, capacity=256, active_limit=8, retention=TIMEOUT_SECONDS):
         self.semaphore, self.timeout = semaphore, timeout
         self.capacity, self.active_limit, self.retention = capacity, active_limit, retention
         self.lock = threading.RLock()

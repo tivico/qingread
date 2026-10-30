@@ -619,6 +619,7 @@ class Companion:
             models, ollama = [], False
         return {"version": VERSION, "ollama": ollama, "models": models, "selected_model": self.config.get("model", ""),
                 "inference_jobs": True, "inference_timeout_seconds": TIMEOUT_SECONDS,
+                "inference_client_identity": True,
                 "pdf_preview": True,
                 "speech_ready": self.whisper_path() is not None,
                 "pdf_installed": importlib.util.find_spec("babeldoc") is not None,
@@ -643,6 +644,18 @@ class Handler(BaseHTTPRequestHandler):
         provided = self.headers.get("Authorization", "")
         if not secrets.compare_digest(provided, "Bearer " + self.app.config["token"]):
             raise UserError("PAIRING", "配對碼不正確，請重新配對。", 401)
+
+    def inference_owner(self):
+        origin=self.headers.get('Origin')
+        client=self.headers.get('X-QingRead-Client')
+        if client is not None:
+            if not re.fullmatch(r'[a-p]{32}',client):
+                raise UserError('CLIENT_ID','外掛識別格式不正確。')
+            owner='chrome-extension://'+client
+            if origin and origin!=owner:
+                raise UserError('ORIGIN','外掛識別與來源不一致。',403)
+            return owner
+        return origin or 'local'
 
     def send_headers(self, status, content_type, length):
         self.send_response(status)
@@ -712,7 +725,7 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin: self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-QingRead-Client")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -758,7 +771,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply({"saved": True})
             inference = re.fullmatch(r'/inference/([0-9a-f]{32})', route)
             if inference:
-                owner = self.headers.get('Origin') or 'local'
+                owner = self.inference_owner()
                 if method == 'POST':
                     return self.reply(self.app.start_inference(inference[1], owner, self.json_body()), 202)
                 if method == 'GET':
