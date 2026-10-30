@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 from unittest.mock import patch
+from pdf_progress import write_progress, track_events
 
 
 def configure_assets(asset_dir, job_cache=None):
@@ -35,7 +36,8 @@ def add_ocr_layer(source, destination):
     engine = RapidOCR()
     found = 0
     with pymupdf.open(source) as document:
-        for page in document:
+        for index,page in enumerate(document):
+            write_progress(Path(destination).parent,'ocr',index,len(document))
             if len(page.get_text().strip()) > 30:
                 continue
             pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
@@ -57,11 +59,13 @@ def add_ocr_layer(source, destination):
         if found == 0 and not any(page.get_text().strip() for page in document):
             raise RuntimeError("OCR_EMPTY")
         document.save(destination)
+        write_progress(Path(destination).parent,'ocr',len(document),len(document))
 
 
 def run(directory):
     directory = Path(directory).resolve()
     options = json.loads((directory / "options.json").read_text(encoding="utf-8"))
+    write_progress(directory,'analysis')
     assets = Path(os.environ["QINGREAD_ASSETS"])
     configure_assets(assets, directory / "cache")
     import babeldoc.main
@@ -84,7 +88,14 @@ def run(directory):
     sys.argv = args
     # Avoid saving or printing document contents through third-party diagnostics.
     logging.disable(logging.CRITICAL)
-    babeldoc.main.cli()
+    import babeldoc.format.pdf.high_level as high_level
+    original=high_level.async_translate
+    state={'finished':False,'error':False}
+    def tracked(*args,**kwargs):return track_events(original(*args,**kwargs),directory,state)
+    with patch.object(high_level,'async_translate',tracked):
+        babeldoc.main.cli()
+    if state['error'] or not state['finished']:raise RuntimeError(state.get('error_code','PDF_NO_OUTPUT'))
+    write_progress(directory,'output')
     if not list(output.glob("*.pdf")):
         raise RuntimeError("PDF_NO_OUTPUT")
     (directory / "result.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
@@ -95,6 +106,7 @@ if __name__ == "__main__":
     try:
         run(directory)
     except BaseException as error:
-        code = str(error) if str(error) in {"OCR_EMPTY", "OCR_LANGUAGE", "PDF_VERSION", "PDF_NO_OUTPUT"} else type(error).__name__
-        (directory / "result.json").write_text(json.dumps({"ok": False, "message": "文件引擎失敗（" + code + "）。請確認資源已準備，並以少量頁數重試。"}, ensure_ascii=False), encoding="utf-8")
+        code = str(error) if str(error) in {"OCR_EMPTY", "OCR_LANGUAGE", "PDF_VERSION", "PDF_NO_OUTPUT","PDF_SCAN_DETECTED"} else type(error).__name__
+        message='文件引擎判定為掃描 PDF。請確認掃描模式；若原檔可選取文字，可先用不同頁碼測試。' if code=='PDF_SCAN_DETECTED' else "文件引擎失敗（" + code + "）。請確認資源已準備，並以少量頁數重試。"
+        (directory / "result.json").write_text(json.dumps({"ok": False, "message":message}, ensure_ascii=False), encoding="utf-8")
         raise SystemExit(1)

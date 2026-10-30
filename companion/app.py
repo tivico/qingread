@@ -189,6 +189,8 @@ class Companion:
                 if job["id"] != directory.name: continue
                 if job["state"] in {"running", "queued"}:
                     job.update(state="failed", message="助手曾中斷，請清除後重新提交。", outputs=[])
+                    if job.get('kind')=='pdf':job['phase']='failed'
+                    job.pop('current',None);job.pop('total',None)
                 job.update(process=None, cancel=threading.Event())
                 self.jobs[job["id"]] = job
                 (directory / "options.json").unlink(missing_ok=True)
@@ -433,7 +435,7 @@ class Companion:
             return job, directory
 
     def public_job(self, job):
-        return {key: job[key] for key in ("id", "kind", "state", "created", "message", "outputs")}
+        return {key: job[key] for key in ("id", "kind", "state", "created", "message", "outputs","phase","current","total","preview","page_count","selected_pages") if key in job}
 
     def get_job(self, identifier):
         with self.lock:
@@ -441,7 +443,7 @@ class Companion:
                 raise UserError("JOB_NOT_FOUND", "找不到這個工作，可能已清除或助手已重新啟動。", 404)
             return self.jobs[identifier]
 
-    def start_pdf(self, raw, source, pages="", scanned=False):
+    def start_pdf(self, raw, source, pages="", scanned=False, preview=False):
         if not raw.startswith(b"%PDF-") or len(raw) > MAX_PDF:
             raise UserError("PDF_FORMAT", "請選擇 64 MB 以內的 PDF 檔。")
         safe_language(source, allow_auto=False)
@@ -458,20 +460,28 @@ class Companion:
                     raise UserError("PDF_PASSWORD", "請先使用你有權限的方式解除 PDF 密碼，再重新選取。")
                 if not 1 <= len(document) <= 500:
                     raise UserError("PDF_PAGES", "目前每份文件支援 1 到 500 頁；請先分割較大的文件。")
-                pages = validate_pages(pages, len(document))
+                page_count=len(document)
+                pages = validate_pages('1-'+str(min(2,page_count)) if preview else pages, page_count)
                 # Refuse image-only input unless the explicit scan workflow is selected.
-                has_text = any(page.get_text().strip() for page in document)
+                has_text = any(page.get_text().strip() for index,page in enumerate(document) if not preview or index<2)
                 if not has_text and not scanned:
                     raise UserError("PDF_SCAN", "這份 PDF 沒有文字圖層。請啟用掃描 PDF 辨識；目前僅適合白底黑字文件。", 409)
+                if preview:
+                    # Physically limit OCR and layout analysis too, not only translation.
+                    with pymupdf.open() as sample:
+                        sample.insert_pdf(document,from_page=0,to_page=min(2,page_count)-1)
+                        raw=sample.tobytes()
         except UserError:
             raise
         except Exception as error:
             raise UserError("PDF_READ", "PDF 無法讀取，請確認檔案完整。") from error
         job, directory = self.new_job("pdf")
+        job.update(phase='queued',preview=bool(preview),page_count=page_count,selected_pages=pages or '全部')
         (directory / "input.pdf").write_bytes(raw)
         options = {"source": source, "pages": pages, "scanned": bool(scanned), "model": model,
                    "base_url": f"http://127.0.0.1:{PORT}/v1", "token": self.config["token"]}
         (directory / "options.json").write_text(json.dumps(options), encoding="utf-8")
+        self.persist_job(job)
         threading.Thread(target=self.run_pdf, args=(job, directory), daemon=True).start()
         return self.public_job(job)
 
@@ -480,7 +490,7 @@ class Companion:
             if job["cancel"].is_set():
                 job.update(state="cancelled", message="已取消。請清除工作以刪除暫存檔。")
                 return
-            job.update(state="running", message="正在分析排版與翻譯；大型文件可能需要數分鐘。")
+            job.update(state="running",phase='analysis',message="正在準備並分析文件；大型文件可能需要數分鐘。")
             env = os.environ.copy()
             env["QINGREAD_ASSETS"] = str(self.data / "assets")
             env["OLLAMA_NO_CLOUD"] = "1"
@@ -489,6 +499,18 @@ class Companion:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             job["process"] = process
             while process.poll() is None:
+                progress_file=directory/'progress.json'
+                try:
+                    if progress_file.stat().st_size<=4096:
+                        progress=json.loads(progress_file.read_text(encoding='utf-8'))
+                        phase=progress.get('phase')
+                        if phase in {'analysis','ocr','translation','output','processing'} and not job['cancel'].is_set():
+                            with self.lock:
+                                job.update(phase=phase,message={'analysis':'正在分析文件與排版。','ocr':'正在辨識掃描文字。','translation':'正在翻譯文件文字。','output':'正在排版並輸出 PDF。','processing':'文件引擎處理中。'}[phase])
+                                job.pop('current',None);job.pop('total',None)
+                                if type(progress.get('current')) is int and type(progress.get('total')) is int and 0<=progress['current']<=progress['total']<=100000:
+                                    job.update(current=progress['current'],total=progress['total'])
+                except (OSError,ValueError,TypeError,AttributeError):pass
                 if job["cancel"].wait(0.3):
                     process.terminate()
                     try: process.wait(timeout=10)
@@ -516,6 +538,8 @@ class Companion:
         except Exception as error:
             job.update(state="failed", message=str(error) if isinstance(error, UserError) else "本機文件處理失敗。請先以較短文件重試。")
         finally:
+            if job['state'] in {'done','failed','cancelled'}:job['phase']=job['state']
+            job.pop('current',None);job.pop('total',None)
             job["process"] = None
             secret_file = directory / "options.json"
             secret_file.unlink(missing_ok=True)
@@ -567,6 +591,8 @@ class Companion:
             job = self.get_job(identifier)
             if job["state"] in {"queued", "running"}:
                 job["cancel"].set()
+                job['phase']='cancelling';job['message']='正在停止工作；程序結束後才會確認取消。'
+                self.persist_job(job)
                 return {"cancelling": True}
             directory = (self.jobs_root / identifier).resolve()
             if directory.parent != self.jobs_root.resolve() or not JOB_RE.fullmatch(directory.name):
@@ -593,6 +619,7 @@ class Companion:
             models, ollama = [], False
         return {"version": VERSION, "ollama": ollama, "models": models, "selected_model": self.config.get("model", ""),
                 "inference_jobs": True, "inference_timeout_seconds": TIMEOUT_SECONDS,
+                "pdf_preview": True,
                 "speech_ready": self.whisper_path() is not None,
                 "pdf_installed": importlib.util.find_spec("babeldoc") is not None,
                 "pdf_assets_ready": (self.data / "assets" / "ready.json").exists()}
@@ -758,7 +785,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and route == "/speech":
                 return self.reply(self.app.transcribe(self.body(2 * 1024 * 1024), query.get("language", ["en"])[0]))
             if method == "POST" and route == "/pdf":
-                return self.reply(self.app.start_pdf(self.body(MAX_PDF), query.get("source", ["en"])[0], query.get("pages", [""])[0], query.get("scanned", ["false"])[0] == "true"), 202)
+                return self.reply(self.app.start_pdf(self.body(MAX_PDF), query.get("source", ["en"])[0], query.get("pages", [""])[0], query.get("scanned", ["false"])[0] == "true", query.get('preview',['false'])[0]=='true'), 202)
             if method == "POST" and route == "/prepare": return self.reply(self.app.start_prepare(self.json_body().get("kind")), 202)
             if method == "GET" and route == "/jobs":
                 self.app.cleanup_expired()

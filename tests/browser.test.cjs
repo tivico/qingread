@@ -694,6 +694,68 @@ test('document workspace renders job downloads safely and shows model/resource r
   }finally{await page.close();}
 });
 
+test('PDF preview submits only explicit trial mode and renders phases plus cancellation acknowledgement',async()=>{
+  const page=await browser.newPage();
+  try{
+    await page.route('https://pdf.test/**',route=>{
+      const name=new URL(route.request().url()).pathname.slice(1)||'workspace.html';
+      return route.fulfill({body:fs.readFileSync(path.join(extension,name)),contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});
+    });
+    await page.addInitScript(()=>{
+      globalThis.pdfHarness={uploads:[],job:null};
+      chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})}}};
+      fetch=async(url,options)=>{
+        let result;
+        if(url.endsWith('/health'))result={models:['local:test'],selected_model:'local:test',ollama:true,pdf_assets_ready:true,pdf_preview:true};
+        else if(url.includes('/pdf?')){
+          pdfHarness.uploads.push(url);
+          pdfHarness.job={id:'a'.repeat(32),kind:'pdf',state:'running',phase:'ocr',message:'正在辨識掃描文字。',preview:true,page_count:3,current:1,total:2,outputs:[]};result=pdfHarness.job;
+        }else if(options.method==='DELETE'){pdfHarness.job.phase='cancelling';result={cancelling:true};}
+        else result={jobs:pdfHarness.job?[pdfHarness.job]:[]};
+        return {ok:true,json:async()=>result};
+      };
+    });
+    await page.goto('https://pdf.test/workspace.html');
+    await page.waitForFunction(()=>!document.querySelector('#preview-pdf').disabled);
+    await page.locator('#pdf').setInputFiles({name:'synthetic.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-synthetic')});
+    await page.locator('#pages').fill('3');
+    await page.locator('#preview-pdf').click();
+    await page.waitForFunction(()=>document.querySelector('#jobs').textContent.includes('辨識掃描文字'));
+    const url=new URL(await page.evaluate(()=>pdfHarness.uploads[0]));
+    assert.equal(url.searchParams.get('preview'),'true');assert.equal(url.searchParams.get('pages'),'');
+    assert.match(await page.locator('#jobs').textContent(),/前 2 頁試翻.*本階段 1 \/ 2/s);
+    await page.locator('#jobs button').filter({hasText:'取消工作'}).click();
+    await page.waitForFunction(()=>document.querySelector('#jobs').textContent.includes('正在取消'));
+    assert.equal(await page.locator('#jobs button').isDisabled(),true);
+    await page.evaluate(()=>{pdfHarness.job.state='cancelled';pdfHarness.job.phase='cancelled';delete pdfHarness.job.current;delete pdfHarness.job.total;});
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('#jobs').textContent.includes('已取消'));
+    assert.match(await page.locator('#jobs button').textContent(),/清除原檔/);
+    assert.doesNotMatch(await page.locator('#jobs').textContent(),/本階段/);
+  }finally{await page.close();}
+});
+
+test('old companion cannot silently turn a two-page preview into a full document upload',async()=>{
+  const page=await browser.newPage();
+  try{
+    await page.route('https://old-pdf.test/**',route=>{
+      const name=new URL(route.request().url()).pathname.slice(1)||'workspace.html';
+      return route.fulfill({body:fs.readFileSync(path.join(extension,name)),contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});
+    });
+    await page.addInitScript(()=>{
+      chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})}}};
+      globalThis.uploaded=false;
+      fetch=async url=>{if(url.includes('/pdf?'))uploaded=true;return {ok:true,json:async()=>url.endsWith('/health')?{models:[],ollama:true}:{jobs:[]}};};
+    });
+    await page.goto('https://old-pdf.test/workspace.html');
+    await page.waitForFunction(()=>document.querySelector('#health').textContent.includes('已連線'));
+    assert.equal(await page.locator('#preview-pdf').isDisabled(),true);
+    await page.evaluate(()=>document.querySelector('#preview-pdf').onclick());
+    await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('重新啟動新版助手'));
+    assert.equal(await page.evaluate(()=>uploaded),false);
+  }finally{await page.close();}
+});
+
 test('generic engine failures identify their stage without blaming page permission or exposing text', async()=>{
   const page=await panelFixture();
   try {
