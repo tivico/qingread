@@ -15,6 +15,7 @@
     const old=session; session=null;
     if (old) {
       clearInterval(old.timer); old.controller.abort();
+      old.speechQueue?.clear();old.lastSpeech=null;
       const cleanup=old.translator?.destroy();
       if(old.translator?.managed)void cleanup.then(results=>{if(!session && el('video-status').textContent===reason)say(reason+' '+QingReadLocal.cancellationText(results));});
       old.stream?.getTracks().forEach(track=>track.stop()); void old.audio?.close().catch(()=>{});
@@ -49,7 +50,7 @@
       if (s.cache.size > 32) s.cache.delete(s.cache.keys().next().value);
     }
     const translated=QingReadCore.applyGlossary(s.terms ? QingReadCore.localize(output) : output, s.glossary);
-    if(Date.now()-started>15000 && s.mode==='speech') { say('處理速度跟不上播放，已略過過期片段。可改用 Chrome 翻譯引擎或降低播放速度。'); return; }
+    if(Date.now()-started>QingReadSpeech.POLICY.maxResultAgeMs && s.mode==='speech') return {applied:false};
     return send(s.target,{type:'qingread:media-show',session:s.id,original:text,text:translated,version,mode:s.mode,timelineVersion});
   }
   async function captions(s) {
@@ -80,22 +81,76 @@
     for(let i=0;i<samples.length;i++)view.setInt16(44+i*2,Math.round(Math.max(-1,Math.min(1,samples[i]))*32767),true);
     return data;
   }
-  async function speech(s,samples) {
-    if(s.busy) { s.dropped++; say(`辨識中，已略過 ${s.dropped} 個跟不上的音訊片段。`); return; }
-    s.busy=true; const started=Date.now();
+  function speechStatus(s,stage){
+    if(s.speechPaused)stage='影片已暫停，等候播放。';
+    const detail=s.speechTiming?`最近辨識 ${s.speechTiming.recognition.toFixed(1)} 秒＋翻譯 ${s.speechTiming.translation.toFixed(1)} 秒；${s.speechTiming.total>4?'處理慢於每 4 秒的輸入，會略過舊片段':'目前處理速度可跟上輸入'}`:'';
+    say(`${stage}${detail?`（${detail}）`:''} 已略過 ${s.speechQueue.dropped+s.dropped} 段；最多保留最新一段等待處理。`);
+  }
+  function syncSpeechTimeline(s,state){
+    s.speechPaused=state.paused;
+    if(s.speechTimeline===undefined){s.speechTimeline=state.timelineVersion;return true;}
+    if(s.speechTimeline===state.timelineVersion)return true;
+    s.speechTimeline=state.timelineVersion;s.speechQueue.clear();s.lastSpeech=null;
+    s.speechAudioEpoch=(s.speechAudioEpoch||0)+1;
+    s.processor?.port.postMessage?.({type:'reset',epoch:s.speechAudioEpoch});
+    return false;
+  }
+  async function watchSpeech(s){
+    if(s.watchReading)return;s.watchReading=true;
+    try{
+      const state=await send(s.target,{type:'qingread:media-read',session:s.id});live(s);
+      const paused=s.speechPaused;
+      if(!syncSpeechTimeline(s,state)||paused!==state.paused)speechStatus(s,'正在聆聽此分頁。');
+    }catch(error){if(session===s)stop(mediaError(error));}finally{s.watchReading=false;}
+  }
+  async function speech(s,frame) {
+    if(!(frame?.samples instanceof Float32Array)||frame.samples.length!==72000)return;
+    if(frame.epoch!==(s.speechAudioEpoch||0)){s.dropped++;return;}
+    const capturedAt=Date.now();
+    try{
+      const state=await send(s.target,{type:'qingread:media-read',session:s.id});live(s);
+      if(!syncSpeechTimeline(s,state)||frame.epoch!==(s.speechAudioEpoch||0)){s.dropped++;return;}
+      if(state?.paused){s.speechQueue.clear();s.lastSpeech=null;return;}
+      s.speechQueue.offer({...frame,capturedAt,state});
+      if(s.busy)speechStatus(s,'正在辨識與翻譯。');
+      void drainSpeech(s);
+    }catch(error){if(session===s)stop(mediaError(error));}
+  }
+  async function drainSpeech(s){
+    if(session!==s||s.busy)return;
+    const frame=s.speechQueue.take(Date.now());if(!frame)return;
+    s.busy=true;const started=performance.now();let recognition=0,translation=0,timed=false;
+    speechStatus(s,'正在辨識。');
     try {
       const state=await send(s.target,{type:'qingread:media-read',session:s.id});live(s);
-      if(state?.paused)return;
-      const result=await QingReadLocal.request('/speech?language='+encodeURIComponent(s.source),{body:wav(samples),signal:s.controller.signal}); live(s);
-      if(result.text) { await display(s,result.text,0,started,state.timelineVersion); live(s); say('正在聆聽此分頁；音訊片段不寫入磁碟。'); }
-    } catch(error) {if(session===s)stop(mediaError(error));} finally{s.busy=false;}
+      if(state?.paused||state.timelineVersion!==frame.state.timelineVersion){s.lastSpeech=null;s.dropped++;return;}
+      const result=await QingReadLocal.request('/speech?language='+encodeURIComponent(s.source),{body:wav(frame.samples),signal:s.controller.signal});live(s);
+      recognition=(performance.now()-started)/1000;
+      const current=await send(s.target,{type:'qingread:media-read',session:s.id});live(s);
+      if(current.paused||current.timelineVersion!==state.timelineVersion||Date.now()-frame.capturedAt>QingReadSpeech.POLICY.maxResultAgeMs){s.lastSpeech=null;s.dropped++;return;}
+      if(result.text){
+        const prior=s.lastSpeech;
+        const contiguous=prior&&prior.sequence+1===frame.sequence&&prior.timeline===state.timelineVersion&&Math.abs(frame.state.time-prior.time-4)<1;
+        const text=QingReadSpeech.trimOverlap(prior?.text,result.text,{contiguous,overlapMs:frame.overlapMs,segments:result.segments});
+        s.lastSpeech={text:result.text,sequence:frame.sequence,timeline:state.timelineVersion,time:frame.state.time};
+        if(text.trim()){
+          speechStatus(s,'正在翻譯。');const translating=performance.now();
+          const shown=await display(s,text,0,frame.capturedAt,state.timelineVersion);live(s);
+          translation=(performance.now()-translating)/1000;timed=true;if(shown?.applied===false)s.dropped++;
+        }
+      }else s.lastSpeech=null;
+    }catch(error){if(session===s)stop(mediaError(error));}
+    finally{
+      s.busy=false;
+      if(session===s){if(timed)s.speechTiming={recognition,translation,total:(performance.now()-started)/1000};speechStatus(s,'正在聆聽此分頁。');void drainSpeech(s);}
+    }
   }
   el('video-start').onclick=async()=>{
     if(session)return;
     if(running){say('請先停止網頁或文字翻譯，再開始字幕。');return;}
     if(!ready){say('請先確認所選翻譯引擎與語言組合可用。');return;}
     const s={id:crypto.randomUUID(),controller:new AbortController(),source:el('source').value,mode:el('video-mode').value,busy:false,reading:false,dropped:0,glossary:glossaryRules.map(rule=>[...rule]),terms:el('terms').checked,
-      cues:QingReadCaptions.createCueBuffer(),cache:new Map(),cacheEnabled:el('engine').value!=='local',bilingual:el('video-bilingual').checked,skipped:0};session=s;
+      cues:QingReadCaptions.createCueBuffer(),speechQueue:QingReadSpeech.createLatestBuffer(),cache:new Map(),cacheEnabled:el('engine').value!=='local',bilingual:el('video-bilingual').checked,skipped:0};session=s;
     el('video-access').hidden=true;accessError=null;
     el('video-start').disabled=true;el('video-stop').disabled=false;
     el('video-mode').disabled=true;el('video-bilingual').disabled=true;say('正在準備影片字幕…');
@@ -121,10 +176,11 @@
         if(session!==s){stream.getTracks().forEach(t=>t.stop());return;}s.stream=stream;
         s.audio=new AudioContext();await s.audio.audioWorklet.addModule('audio-worklet.js');live(s);
         const source=s.audio.createMediaStreamSource(stream), processor=new AudioWorkletNode(s.audio,'qingread-audio');
+        s.processor=processor;s.timer=setInterval(()=>void watchSpeech(s),250);
         source.connect(s.audio.destination);source.connect(processor);processor.connect(s.audio.destination);
         processor.port.onmessage=event=>{if(session===s)void speech(s,event.data);};
         stream.getTracks().forEach(track=>track.addEventListener('ended',()=>{if(session===s)stop('音訊擷取已結束。');}));
-        await s.audio.resume();say('正在聆聽此分頁，每 4 秒辨識一段。');
+        await s.audio.resume();say('正在聆聽此分頁，每 4 秒處理一段，邊界保留 0.5 秒重疊。');
       }
     }catch(error){
       if(session===s){stop(mediaError(error));if(error.name==='PageAccessError'){accessError=error;el('video-access').hidden=false;}}

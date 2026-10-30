@@ -157,6 +157,75 @@ test('caption status follows visible captions and reports slow or skipped result
   } finally { await page.close(); }
 });
 
+async function speechPanel(){
+  const page=await panelFixture();
+  await page.evaluate(()=>{
+    harness.recognizers=[];harness.timeline=1;harness.time=4.5;harness.trackStops=0;
+    chrome.permissions={request:async()=>true};chrome.runtime={sendMessage:async()=>({streamId:'synthetic'})};
+    const track={stop(){harness.trackStops++;},addEventListener(){}};
+    Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUserMedia:async()=>({getTracks:()=>[track]})}});
+    globalThis.AudioContext=class{constructor(){this.audioWorklet={addModule:async()=>{}};this.destination={};}createMediaStreamSource(){return {connect(){}};}async resume(){}async close(){}};
+    globalThis.AudioWorkletNode=class{constructor(){this.port={postMessage(message){harness.audioEpoch=message.epoch;harness.resets=(harness.resets||0)+1;}};harness.audioPort=this.port;}connect(){}};
+    chrome.tabs.sendMessage=async(_id,message)=>{
+      harness.messages.push(message);
+      if(message.type==='qingread:media-read')return {paused:false,time:harness.time,timelineVersion:harness.timeline};
+      return {ok:true,applied:true};
+    };
+    Translator.create=async()=>({destroy(){},translate:async text=>{harness.translations.push(text);return '測試譯文';}});
+    QingReadLocal.request=async(path,options)=>{
+      harness.speechSignal=options.signal;
+      return new Promise(resolve=>harness.recognizers.push(resolve));
+    };
+    harness.emitFrame=sequence=>{harness.time=4.5+sequence*4;harness.audioPort.onmessage({data:{samples:new Float32Array(72000),sequence,epoch:harness.audioEpoch||0,durationMs:4500,overlapMs:sequence?500:0}});};
+  });
+  await page.locator('[data-view=video]').click();await page.selectOption('#video-mode','speech');await page.locator('#video-start').click();
+  await page.waitForFunction(()=>Boolean(harness.audioPort));
+  return page;
+}
+test('speech keeps only the latest waiting frame, rejects seeked audio, and stops late results',async()=>{
+  const page=await speechPanel();
+  try{
+    await page.evaluate(()=>harness.emitFrame(0));await page.waitForFunction(()=>harness.recognizers.length===1);
+    await page.evaluate(()=>harness.emitFrame(1));await page.evaluate(()=>harness.emitFrame(2));
+    await page.evaluate(()=>harness.recognizers[0]({text:'Please keep the original file.',segments:[{start:0,end:4}]}));
+    await page.waitForFunction(()=>harness.recognizers.length===2);
+    assert.equal(await page.evaluate(()=>harness.translations.length),1);
+    await page.evaluate(()=>harness.recognizers[1]({text:'The original file is safe.',segments:[{start:0,end:4}]}));
+    await page.waitForFunction(()=>harness.translations.length===2);
+    assert.equal(await page.evaluate(()=>harness.translations[1]),'The original file is safe.','A skipped window must not remove a coincidental repeat');
+    await page.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('最近辨識'));
+    assert.match(await page.locator('#video-status').textContent(),/已略過 1 段/);
+    await page.evaluate(()=>harness.emitFrame(3));await page.waitForFunction(()=>harness.recognizers.length===3);
+    await page.evaluate(()=>{harness.timeline++;harness.recognizers[2]({text:'Old timeline audio',segments:[]});});
+    await page.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('已略過 2 段'));
+    await page.waitForFunction(()=>harness.resets===1);
+    await page.evaluate(()=>harness.audioPort.onmessage({data:{samples:new Float32Array(72000),sequence:3,epoch:0}}));
+    assert.equal(await page.evaluate(()=>harness.recognizers.length),3,'An old worklet message arriving after reset must be rejected');
+    assert.equal(await page.evaluate(()=>harness.translations.length),2);
+    await page.evaluate(()=>harness.emitFrame(4));await page.waitForFunction(()=>harness.recognizers.length===4);
+    await page.locator('#video-stop').click();
+    assert.equal(await page.evaluate(()=>harness.speechSignal.aborted),true);
+    await page.evaluate(()=>harness.recognizers[3]({text:'Late after stop',segments:[]}));
+    assert.equal(await page.evaluate(()=>harness.translations.length),2);
+    assert.equal(await page.evaluate(()=>harness.trackStops),1);
+  }finally{await page.close();}
+});
+test('speech deduplicates only overlapping adjacent windows and exposes stage timings',async()=>{
+  const page=await speechPanel();
+  try{
+    await page.evaluate(()=>harness.emitFrame(0));await page.waitForFunction(()=>harness.recognizers.length===1);
+    await page.evaluate(()=>harness.recognizers[0]({text:'Please keep the original file.',segments:[{start:0,end:4}]}));
+    await page.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('最近辨識'));
+    await page.evaluate(()=>harness.emitFrame(1));await page.waitForFunction(()=>harness.recognizers.length===2);
+    await page.evaluate(()=>harness.recognizers[1]({text:'The original file is safe.',segments:[{start:0,end:3}]}));
+    await page.waitForFunction(()=>harness.translations.length===2);
+    assert.equal(await page.evaluate(()=>harness.translations[1]),'is safe.');
+    await page.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('最近辨識'));
+    assert.match(await page.locator('#video-status').textContent(),/辨識.*秒＋翻譯.*秒/);
+    await page.locator('#video-stop').click();
+  }finally{await page.close();}
+});
+
 async function fixture(url='https://fixture.test/') {
   const page = await browser.newPage();
   await page.route(new URL(url).origin+'/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: fs.readFileSync(path.join(__dirname, 'fixture.html')) }));

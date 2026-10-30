@@ -10,6 +10,7 @@
   <script src="local-client.js" defer></script>
   <script src="panel.js" defer></script>
   <script src="caption-state.js" defer></script>
+  <script src="speech-state.js" defer></script>
   <script src="video.js" defer></script>
   <script src="summary.js" defer></script>
   <script src="frames.js" defer></script>
@@ -50,7 +51,7 @@
       <label class="check"><input id="video-bilingual" type="checkbox" checked>同時顯示原文</label>
       <p class="hint">舒適閱讀：原文與繁中一起整段更新，保留至少約 2 秒閱讀時間。預設雙語對照；只想看繁中時可在開始前取消勾選原文。換句太快時會略過過期譯文，避免字幕越積越慢。</p>
       <p class="hint">YouTube 請保持原字幕開啟。譯文出現時會暫時隱藏原字幕，停止後恢復；暫停影片可保留譯文慢慢讀。翻譯較原字幕稍有延遲。</p>
-      <p class="hint">語音模式需本機助手與語音模型，會擷取此分頁所有聲音，通常有數秒以上延遲。</p>
+      <p class="hint">語音模式需本機助手與語音模型，會擷取此分頁所有聲音。每 4 秒處理一段，保留 0.5 秒邊界重疊；最多等候最新一段，跟不上時略過舊片段。側欄會顯示辨識與翻譯耗時，通常有數秒以上延遲。</p>
       <div class="actions"><button id="video-start">開始字幕</button><button id="video-stop" disabled>停止字幕</button></div>
       <button id="video-access" hidden>處理此網站的存取權</button>
       <p id="video-status" class="hint" role="status">先開啟影片，再開始。字幕與整頁翻譯請分開使用。</p>
