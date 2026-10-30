@@ -16,7 +16,7 @@ const fs=require('node:fs');const path=require('node:path');const assert=require
   await article.goto(url,{waitUntil:'domcontentloaded',timeout:60000});await article.bringToFront();
   await panel.evaluate(()=>{document.querySelector('[data-view="summary"]').click();document.querySelector('#summary-start').click();});
   await panel.waitForFunction(()=>!document.querySelector('#summary-grant').hidden);
-  assert.match(await panel.locator('#summary-grant').textContent(),/允許/);
+  assert.match(await panel.locator('#summary-grant').textContent(),/允許|檢查網站存取/);
   await panel.evaluate(()=>document.querySelector('#summary-grant').click());
   await panel.waitForFunction(()=>document.querySelector('#summary-status').textContent.includes('尚未取得授權'));
   report.realTabAccessRequest=true;

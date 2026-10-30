@@ -132,7 +132,9 @@
     if (Number.isInteger(sourceWindowId) && Number.isInteger(info.windowId) && info.windowId !== sourceWindowId) return;
     if (info.tabId !== sourceTabId) clear();
   });
-  chrome.tabs.onUpdated.addListener((id, change) => { if (change.status === 'loading' && id === sourceTabId) clear(); });
+  // SPA navigation may update only the URL, without reloading the document.
+  chrome.tabs.onUpdated.addListener((id, change) => { if ((change.status === 'loading' || change.url) && id === sourceTabId) clear(); });
+  chrome.tabs.onRemoved?.addListener(id => { if (id === sourceTabId) clear(); });
   window.addEventListener('pagehide', () => stop());
   // Temporary hiding does not invalidate captured text. Page/tab changes and explicit stop still cancel.
   document.addEventListener('visibilitychange', revealResult);

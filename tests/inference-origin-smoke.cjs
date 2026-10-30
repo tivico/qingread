@@ -38,5 +38,6 @@ const {spawn}=require('node:child_process');
     fs.writeFileSync(path.join(results,legacy?'inference-origin-smoke-legacy.json':'inference-origin-smoke.json'),JSON.stringify({trace,outcome},null,2));
     console.log(JSON.stringify({trace,outcome}));
     assert.equal(outcome.ok,!legacy);
+    if(legacy){assert.match(outcome.message,/重新啟動/);assert.equal(trace.filter(item=>item.method==='POST').length,0);}
   }finally{await context?.close();helper.kill();}
 })().catch(error=>{console.error(error.message);process.exitCode=1;});

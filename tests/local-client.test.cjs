@@ -20,6 +20,49 @@ function client(fetch, saved = { companionToken: token }) {
   return context.QingReadLocal;
 }
 
+// Managed-job fixtures declare their server capability separately from job replies.
+function managedClient(fetch) {
+  return client((url, options) => url.endsWith('/health')
+    ? Promise.resolve(new Response(JSON.stringify({inference_jobs:true,inference_client_identity:true})))
+    : fetch(url, options));
+}
+
+test('an old running companion is rejected before any model job is submitted', async () => {
+  for (const health of [{version:'0.3.8',inference_jobs:true}, {inference_jobs:true,inference_client_identity:false}, null]) {
+    const calls=[];
+    const local=client(async(url,options)=>{
+      calls.push({url,method:options.method});
+      return new Response(JSON.stringify(url.endsWith('/health')?health:{stage:'done',text:'Unexpected'}));
+    });
+    await assert.rejects(local.request('/summarize',{body:{text:'Private source'},managed:true}),
+      error=>error.code==='COMPANION_UPDATE_REQUIRED' && /重新啟動.*companion\/start.cmd/.test(error.message));
+    assert.deepEqual(calls.map(call=>call.method),['GET']);
+    assert.ok(calls[0].url.endsWith('/health'));
+  }
+});
+
+test('stopping during compatibility check never creates or cancels a nonexistent model job', async () => {
+  const controller=new AbortController(),calls=[];
+  const local=client(async(url,options)=>{
+    calls.push(options.method);controller.abort();
+    return new Response(JSON.stringify({inference_jobs:true,inference_client_identity:true}));
+  });
+  await assert.rejects(local.request('/summarize',{body:{text:'Source'},managed:true,signal:controller.signal}),{name:'AbortError'});
+  assert.deepEqual(calls,['GET']);
+});
+
+test('each new job rechecks the running companion after a restart', async () => {
+  let checks=0,submissions=0;
+  const local=client(async(url,options)=>{
+    if(url.endsWith('/health'))return new Response(JSON.stringify({inference_jobs:true,inference_client_identity:++checks===1}));
+    if(options.method==='POST')submissions++;
+    return new Response(JSON.stringify({stage:'done',text:'Complete'}));
+  });
+  await local.request('/summarize',{body:{text:'First'},managed:true});
+  await assert.rejects(local.request('/summarize',{body:{text:'Second'},managed:true}),error=>error.code==='COMPANION_UPDATE_REQUIRED');
+  assert.equal(checks,2);assert.equal(submissions,1);
+});
+
 function streamResponse(chunks, { close = true } = {}) {
   let cancelled = false;
   const stream = new ReadableStream({
@@ -122,7 +165,7 @@ test('a JSON-only companion still works when progress was requested', async () =
 test('destroying a translator aborts its pending request', async () => {
   let fetched;
   const started = new Promise(resolve => { fetched = resolve; });
-  const local = client((_url, options) => options.method === 'DELETE' ? Promise.resolve(new Response('{"stage":"cancelled"}')) : new Promise((_resolve, reject) => {
+  const local = managedClient((_url, options) => options.method === 'DELETE' ? Promise.resolve(new Response('{"stage":"cancelled"}')) : new Promise((_resolve, reject) => {
     options.signal.addEventListener('abort', () => reject(new DOMException('Stopped', 'AbortError')), { once: true });
     fetched();
   }));
@@ -146,7 +189,7 @@ test('network errors show an actionable message without exposing raw details', a
 test('cancelling one translation aborts its fetch without destroying the reusable translator', async () => {
   let firstSignal, started;
   const began = new Promise(resolve => { started = resolve; });
-  const local = client((_url, options) => {
+  const local = managedClient((_url, options) => {
     if(options.method === 'DELETE')return Promise.resolve(new Response('{"stage":"cancelled"}'));
     if (JSON.parse(options.body).text === 'second') return Promise.resolve(new Response('{"stage":"done","text":"第二筆"}'));
     firstSignal = options.signal;
@@ -189,7 +232,7 @@ test('cancellation while reading a JSON body discards its late result', async ()
 
 test('managed work reports queue and generation stages before returning cached metadata', async () => {
   const stages=['queued','reading','generating','done'], seen=[], requests=[];
-  const local=client(async (url,options)=>{
+  const local=managedClient(async (url,options)=>{
     requests.push({url,options});
     const stage=stages.shift();
     return new Response(JSON.stringify({stage,...(stage==='done'?{text:'完成',cached:true}:{})}));
@@ -206,7 +249,7 @@ test('managed work reports queue and generation stages before returning cached m
 test('managed cancellation confirms cleanup even when creation has not returned', async () => {
   let began, route, deletes=0, polls=0;
   const started=new Promise(resolve=>{began=resolve;});
-  const local=client((url,options)=>{
+  const local=managedClient((url,options)=>{
     if(options.method==='POST'){
       route=url;began();
       return new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new DOMException('Stopped','AbortError')),{once:true}));
@@ -225,7 +268,7 @@ test('managed cancellation confirms cleanup even when creation has not returned'
 
 test('managed deadline requests cancellation and reports timeout rather than a network failure', async () => {
   let cancelled=false;
-  const local=client(async (_url,options)=>{
+  const local=managedClient(async (_url,options)=>{
     if(options.method==='DELETE'){cancelled=true;return new Response('{"stage":"cancelled"}');}
     return new Response('{"stage":"reading"}');
   });
@@ -236,7 +279,7 @@ test('managed deadline requests cancellation and reports timeout rather than a n
 
 test('a reusable local translator pins model identity for later chunks and preserves model-change errors', async () => {
   const bodies=[], identity='a'.repeat(64);
-  const local=client(async (_url,options)=>{
+  const local=managedClient(async (_url,options)=>{
     bodies.push(JSON.parse(options.body));
     return new Response(JSON.stringify(bodies.length===1?{stage:'done',text:'第一段',modelIdentity:identity}:{stage:'failed',error:'MODEL_CHANGED',message:'模型已變更'}));
   });
@@ -250,7 +293,7 @@ test('a reusable local translator pins model identity for later chunks and prese
 test('destroy after an unconfirmed cancellation never reports that the assistant stopped', async () => {
   let entered;
   const started=new Promise(resolve=>{entered=resolve;});
-  const local=client((_url,options)=>{
+  const local=managedClient((_url,options)=>{
     if(options.method==='DELETE')throw new Error('connection lost');
     entered();return new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new DOMException('Stopped','AbortError')),{once:true}));
   });
@@ -263,7 +306,7 @@ test('destroy after an unconfirmed cancellation never reports that the assistant
 
 test('a lost managed job gives a restart action and never resubmits the source automatically',async()=>{
   let submissions=0,cleanup=0;
-  const local=client(async(_url,options)=>{
+  const local=managedClient(async(_url,options)=>{
     if(options.method==='POST'){submissions++;return new Response('{"stage":"reading"}');}
     if(options.method==='DELETE'){cleanup++;return new Response('{"stage":"cancelled"}');}
     return new Response('{"error":"NOT_FOUND","message":"找不到此本機工作。"}',{status:404});

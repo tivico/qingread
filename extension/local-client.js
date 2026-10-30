@@ -160,6 +160,15 @@ globalThis.QingReadLocal = {
     combined.addEventListener('abort',cancel,{once:true});
     try {
       if (combined.aborted) throw new DOMException('Stopped','AbortError');
+      // Files on disk and the already-running helper can have the same version
+      // but different capabilities. Check the process before sending source text.
+      const health = await this.request('/health',{token,signal:combined});
+      if (health?.inference_jobs !== true || health?.inference_client_identity !== true) {
+        const error = new Error('目前執行中的本機助手尚未載入必要更新。請先結束其他工作，關閉助手視窗，再重新啟動本專案的 companion/start.cmd，然後重試。只重載外掛不會更新已開啟的助手。');
+        error.code = 'COMPANION_UPDATE_REQUIRED';
+        throw error;
+      }
+      if (combined.aborted) throw new DOMException('Stopped','AbortError');
       started = true;
       let result = await this.request(route,{body:{...body,kind},token,signal:combined,clientId});
       let previous = '';

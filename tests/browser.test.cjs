@@ -308,6 +308,7 @@ async function panelFixture(mode = 'normal') {
         query: async () => [{ id: state.currentTab, url: 'https://article.test/' }],
         onActivated: { addListener: fn => { const previous=state.onActivated; state.onActivated=(...args)=>{previous?.(...args);fn(...args);}; } },
         onUpdated: { addListener: fn => { const previous=state.onUpdated; state.onUpdated=(...args)=>{previous?.(...args);fn(...args);}; } },
+        onRemoved: { addListener: fn => { const previous=state.onRemoved; state.onRemoved=(...args)=>{previous?.(...args);fn(...args);}; } },
         sendMessage: async (id, message, options) => {
           state.messages.push({ id, ...message, documentId: options.documentId });
           if (message.type.endsWith('collect') || message.type === 'qingread:summary-source') return { items, limited: false };
@@ -660,7 +661,7 @@ test('companion client uses fixed loopback, omits credentials and stores pairing
     await page.evaluate(()=>{
       globalThis.saved={};globalThis.requests=[];
       globalThis.chrome={storage:{session:{setAccessLevel:async()=>{},get:async()=>saved,set:async value=>Object.assign(saved,value)}}};
-      globalThis.fetch=async(url,options)=>{requests.push({url,...options});return {ok:true,json:async()=>({stage:'done',text:'譯文'})};};
+      globalThis.fetch=async(url,options)=>{requests.push({url,...options});return {ok:true,json:async()=>url.endsWith('/health')?{inference_jobs:true,inference_client_identity:true}:{stage:'done',text:'譯文'}};};
     });
     await page.addScriptTag({path:path.join(extension,'local-client.js')});
     const result=await page.evaluate(async()=>{
@@ -947,6 +948,33 @@ test('summary UI uses local endpoint, labels partial text and renders safely',as
     await page.evaluate(()=>harness.onActivated({tabId:8}));assert.equal(await page.locator('#summary-result').textContent(),'');
   }finally{await page.close();}
 });
+for(const change of ['url','removed'])test(`summary cancels on source ${change} without a loading event`,async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      QingReadLocal.request=(_path,options)=>new Promise(resolve=>{
+        harness.summarySignal=options.signal;
+        harness.finishSummary=()=>resolve({text:'Stale summary'});
+      });
+    });
+    await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
+    await page.waitForFunction(()=>Boolean(harness.finishSummary));
+    await page.evaluate(change=>{
+      if(change==='url')harness.onUpdated(99,{url:'https://other.test/'});
+      else harness.onRemoved(99);
+    },change);
+    assert.equal(await page.evaluate(()=>harness.summarySignal.aborted),false);
+    await page.evaluate(change=>{
+      if(change==='url')harness.onUpdated(7,{url:'https://article.test/next'});
+      else harness.onRemoved(7);
+    },change);
+    assert.equal(await page.evaluate(()=>harness.summarySignal.aborted),true);
+    await page.evaluate(()=>harness.finishSummary());
+    assert.equal(await page.locator('#summary-result').textContent(),'');
+    assert.equal(await page.locator('#summary-start').isEnabled(),true);
+  }finally{await page.close();}
+});
+
 test('stopped summary never displays delayed model output',async()=>{
   const page=await panelFixture();
   try {
@@ -1300,6 +1328,7 @@ test('local text shows queue and generation phases and waits for cancellation ac
       harness.stage='queued';
       fetch=async(url,options)=>{
         harness.messages.push({url,method:options.method});
+        if(url.endsWith('/health'))return new Response(JSON.stringify({inference_jobs:true,inference_client_identity:true}));
         if(options.method==='DELETE')harness.stage='cancelling';
         return new Response(JSON.stringify({stage:harness.stage}));
       };

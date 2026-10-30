@@ -14,9 +14,19 @@ if __name__=='__main__':
                 yield {'message':{'content':'人工測試摘要'},'done':True}
             def cancel(self):pass
             def close(self):pass
-        app=Companion(directory,model,managed_stream=Stream)
-        app.config.update(token='a'*43,model='synthetic:test');app.traditional=lambda text:text
-        if '--legacy-owner' in sys.argv:Handler.inference_owner=lambda self:self.headers.get('Origin') or 'local'
+        if '--live-model' in sys.argv:
+            selected=json.loads((Path(__file__).resolve().parents[1]/'companion/data/config.json').read_text(encoding='utf-8')).get('model')
+            app=Companion(directory)
+            app.config.update(token='a'*43,model=selected)
+        else:
+            app=Companion(directory,model,managed_stream=Stream)
+            app.config.update(token='a'*43,model='synthetic:test');app.traditional=lambda text:text
+        if '--legacy-owner' in sys.argv:
+            Handler.inference_owner=lambda self:self.headers.get('Origin') or 'local'
+            current_health=app.health
+            def legacy_health():
+                health=current_health();health.pop('inference_client_identity',None);return health
+            app.health=legacy_health
         server=make_server(app,0)
         print(json.dumps({'port':server.server_port}),flush=True)
         try:server.serve_forever()
