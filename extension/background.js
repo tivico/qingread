@@ -21,3 +21,5 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   })().catch(() => reply({error:'無法擷取此分頁音訊，請重新點外掛圖示並開始。'}));
   return true;
 });
+
+importScripts('local-client.js', 'video-background.js');

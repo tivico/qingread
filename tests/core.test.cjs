@@ -36,7 +36,7 @@ test('error messages do not include potentially sensitive error content', () => 
 test('manifest defaults to temporary access with optional site grants and restricts network to local companion', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../extension/manifest.json')));
   assert.equal(manifest.manifest_version, 3);
-  assert.deepEqual(manifest.permissions.slice().sort(), ['activeTab', 'scripting', 'sidePanel', 'storage']);
+  assert.deepEqual(manifest.permissions.slice().sort(), ['activeTab', 'offscreen', 'scripting', 'sidePanel', 'storage']);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.content_scripts, undefined);
   assert.equal(manifest.externally_connectable, undefined);
@@ -48,7 +48,7 @@ test('manifest defaults to temporary access with optional site grants and restri
 test('toolbar opens panel directly using action gesture without automatically toggling it',()=>{
   const vm=require('node:vm');let clicked,behavior,opened;
   const chrome={sidePanel:{setPanelBehavior:async value=>{behavior=value;},open:async value=>{opened=value;}},runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}}},action:{onClicked:{addListener(fn){clicked=fn;}}}};
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension/background.js'),'utf8'),{chrome,console});
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension/background.js'),'utf8'),{chrome,console,importScripts(){}});
   assert.equal(behavior.openPanelOnActionClick,false);
   clicked({id:7,windowId:3});assert.equal(opened.windowId,3);
 });

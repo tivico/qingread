@@ -7,14 +7,15 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../extension/local-client.js'), 'utf8');
 const token = 'a'.repeat(43);
 
-function client(fetch, saved = { companionToken: token }) {
+function client(fetch, saved = { companionToken: token }, persisted = {}) {
   const context = {
     fetch, Blob, ArrayBuffer, TextDecoder, AbortController, AbortSignal, DOMException, crypto, setTimeout, clearTimeout,
     chrome: {runtime:{id:'a'.repeat(32)}, storage: { session: {
       get: async () => saved,
       setAccessLevel: async () => {},
-      set: async value => Object.assign(saved, value)
-    } } }
+      set: async value => Object.assign(saved, value),
+      remove: async key => { delete saved[key]; }
+    }, local: {get: async()=>persisted, set: async value=>Object.assign(persisted,value), remove: async key=>{delete persisted[key];}, setAccessLevel: async()=>{}} } }
   };
   vm.runInNewContext(source, context);
   return context.QingReadLocal;
@@ -313,4 +314,55 @@ test('a lost managed job gives a restart action and never resubmits the source a
   });
   await assert.rejects(local.request('/summarize',{body:{text:'Synthetic source'},managed:true}),error=>/工作紀錄已失效.*請重新開始/.test(error.message));
   assert.equal(submissions,1);assert.equal(cleanup,1);
+});
+
+test('remembered pairing survives a fresh session without pairing again; default pairing stays temporary',async()=>{
+  const saved={},persisted={},calls=[];
+  const fetch=async(url,options)=>{calls.push({url,auth:options.headers.Authorization});return new Response('{}');};
+  const local=client(fetch,saved,persisted);
+  await local.pair(token);
+  assert.deepEqual(persisted,{});
+  await local.pair(token,{remember:true});
+  assert.equal(persisted.rememberedCompanionToken,token);
+  const restarted=client(fetch,{},persisted);
+  await restarted.request('/health');
+  assert.equal(calls.at(-1).auth,`Bearer ${token}`);
+  assert.equal(calls.some(call=>call.url.includes('/pair/')),false);
+  await restarted.forgetDevice();
+  assert.deepEqual(persisted,{});
+  await assert.rejects(restarted.request('/health'),/配對/);
+});
+
+test('opting out keeps a restored connection for this session only',async()=>{
+  const saved={},persisted={rememberedCompanionToken:token};
+  const local=client(async()=>new Response('{}'),saved,persisted);
+  await local.rememberDevice(false);
+  assert.deepEqual(persisted,{});
+  assert.equal(saved.companionToken,token);
+  await local.request('/health');
+});
+
+test('failed authentication never persists an opted-in pairing',async()=>{
+  const saved={},persisted={};
+  const local=client(async()=>new Response('{}',{status:401}),saved,persisted);
+  await assert.rejects(local.pair(token,{remember:true}));
+  assert.deepEqual(saved,{});assert.deepEqual(persisted,{});
+});
+
+test('forgetting during authentication prevents delayed pairing from restoring credentials',async()=>{
+  let resolve,started;
+  const ready=new Promise(r=>started=r),saved={},persisted={};
+  const local=client(()=>new Promise(r=>{resolve=r;started();}),saved,persisted);
+  const pending=local.pair(token,{remember:true});
+  await ready;await local.forgetDevice();resolve(new Response('{}'));
+  await assert.rejects(pending,{name:'AbortError'});
+  assert.deepEqual(saved,{});assert.deepEqual(persisted,{});
+});
+
+test('opting out while remember authentication is pending does not resave the credential',async()=>{
+  let resolve,started;const ready=new Promise(r=>started=r),persisted={};
+  const local=client(()=>new Promise(r=>{resolve=r;started();}),{companionToken:token},persisted);
+  const pending=local.rememberDevice(true);
+  await ready;await local.rememberDevice(false);resolve(new Response('{}'));
+  assert.equal(await pending,false);assert.deepEqual(persisted,{});
 });

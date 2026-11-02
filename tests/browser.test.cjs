@@ -844,7 +844,7 @@ test('document workspace renders job downloads safely and shows model/resource r
       return route.fulfill({body:fs.readFileSync(path.join(extension,name)),contentType:name.endsWith('.svg')?'image/svg+xml':name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});
     });
     await page.addInitScript(()=>{
-      globalThis.chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})}}};
+      globalThis.chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})},local:{get:async()=>({})}}};
       globalThis.fetch=async url=>({ok:true,json:async()=>url.endsWith('/health')?{models:['local:small'],selected_model:'local:small',ollama:true,speech_ready:true,pdf_assets_ready:true}:{jobs:[{id:'a'.repeat(32),kind:'pdf',state:'done',message:'已產生譯本',outputs:[{name:'<script>sample.pdf',size:100}]}]}});
     });
     await page.goto('https://workspace.test/workspace.html');
@@ -864,7 +864,7 @@ test('PDF preview submits only explicit trial mode and renders phases plus cance
     });
     await page.addInitScript(()=>{
       globalThis.pdfHarness={uploads:[],job:null};
-      chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})}}};
+      chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})},local:{get:async()=>({})}}};
       fetch=async(url,options)=>{
         let result;
         if(url.endsWith('/health'))result={models:['local:test'],selected_model:'local:test',ollama:true,pdf_assets_ready:true,pdf_preview:true};
@@ -904,7 +904,7 @@ test('old companion cannot silently turn a two-page preview into a full document
       return route.fulfill({body:fs.readFileSync(path.join(extension,name)),contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});
     });
     await page.addInitScript(()=>{
-      chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})}}};
+      chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})},local:{get:async()=>({})}}};
       globalThis.uploaded=false;
       fetch=async url=>{if(url.includes('/pdf?'))uploaded=true;return {ok:true,json:async()=>url.endsWith('/health')?{models:[],ollama:true}:{jobs:[]}};};
     });
@@ -1105,16 +1105,17 @@ test('summary UI uses local endpoint, labels partial text and renders safely',as
     const request=await page.evaluate(()=>harness.summary);assert.equal(request.path,'/summarize');assert.equal(request.text.length,6000);
     assert.match(await page.locator('#summary-status').textContent(),/未涵蓋全文/);assert.equal(await page.locator('#summary-result img').count(),0);
     await page.screenshot({path:path.join(__dirname,'../test-results/summary.png'),fullPage:true});
-    await page.evaluate(()=>harness.onActivated({tabId:8}));assert.equal(await page.locator('#summary-result').textContent(),'');
+    await page.evaluate(()=>harness.onActivated({tabId:8}));assert.match(await page.locator('#summary-result').textContent(),/三個摘要/);
+    assert.match(await page.locator('#summary-source').textContent(),/摘要來源：/);
   }finally{await page.close();}
 });
-for(const change of ['url','removed'])test(`summary cancels on source ${change} without a loading event`,async()=>{
+for(const change of ['url','removed'])test(`captured summary survives source ${change} without a loading event`,async()=>{
   const page=await panelFixture();
   try{
     await page.evaluate(()=>{
       QingReadLocal.request=(_path,options)=>new Promise(resolve=>{
         harness.summarySignal=options.signal;
-        harness.finishSummary=()=>resolve({text:'Stale summary'});
+        harness.finishSummary=()=>resolve({text:'原文快照摘要'});
       });
     });
     await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
@@ -1128,9 +1129,10 @@ for(const change of ['url','removed'])test(`summary cancels on source ${change} 
       if(change==='url')harness.onUpdated(7,{url:'https://article.test/next'});
       else harness.onRemoved(7);
     },change);
-    assert.equal(await page.evaluate(()=>harness.summarySignal.aborted),true);
+    assert.equal(await page.evaluate(()=>harness.summarySignal.aborted),false);
     await page.evaluate(()=>harness.finishSummary());
-    assert.equal(await page.locator('#summary-result').textContent(),'');
+    assert.equal(await page.locator('#summary-result').textContent(),'原文快照摘要');
+    assert.match(await page.locator('#summary-source').textContent(),/原文快照/);
     assert.equal(await page.locator('#summary-start').isEnabled(),true);
   }finally{await page.close();}
 });
@@ -1187,18 +1189,18 @@ test('another browser window cannot cancel or erase this window summary',async()
     await page.evaluate(()=>harness.onActivated({tabId:98,windowId:20}));
     assert.equal(await page.locator('#summary-result').textContent(),'本視窗的摘要。');
     await page.evaluate(()=>harness.onActivated({tabId:8,windowId:10}));
-    assert.equal(await page.locator('#summary-result').textContent(),'');
+    assert.equal(await page.locator('#summary-result').textContent(),'本視窗的摘要。');
   }finally{await page.close();}
 });
 
-test('summary reports a source-tab change instead of silently discarding a successful response',async()=>{
+test('summary keeps its captured source when active tab changes before completion',async()=>{
   const page=await panelFixture();
   try {
     await page.evaluate(()=>{QingReadLocal.request=async()=>{harness.currentTab=8;return {text:'前一頁摘要'};};});
     await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
     await page.waitForFunction(()=>document.querySelector('#summary-stop').disabled);
-    assert.equal(await page.locator('#summary-result').textContent(),'');
-    assert.match(await page.locator('#summary-status').textContent(),/來源分頁已變更/);
+    assert.equal(await page.locator('#summary-result').textContent(),'前一頁摘要');
+    assert.match(await page.locator('#summary-source').textContent(),/摘要來源：article.test/);
     assert.doesNotMatch(await page.locator('#summary-status').textContent(),/整理中/);
   }finally{await page.close();}
 });
@@ -1720,8 +1722,8 @@ async function pairingWorkspace(mode='pending') {
   return r.fulfill({body:fs.readFileSync(path.join(extension,name)),contentType:name.endsWith('.svg')?'image/svg+xml':name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});
  });
  await page.addInitScript(mode=>{
-  globalThis.pairHarness={mode,saved:{},requests:[],gesture:false};
-  globalThis.chrome={permissions:{request:async()=>{pairHarness.gesture=navigator.userActivation.isActive;return mode!=='permission-denied';}},storage:{session:{setAccessLevel:async()=>{},get:async()=>pairHarness.saved,set:async value=>Object.assign(pairHarness.saved,value)}}};
+  globalThis.pairHarness={mode,saved:{},persisted:{},requests:[],gesture:false};
+  globalThis.chrome={permissions:{request:async()=>{pairHarness.gesture=navigator.userActivation.isActive;return mode!=='permission-denied';}},storage:{session:{setAccessLevel:async()=>{},get:async()=>pairHarness.saved,set:async value=>Object.assign(pairHarness.saved,value),remove:async key=>{delete pairHarness.saved[key];}},local:{setAccessLevel:async()=>{},get:async()=>pairHarness.persisted,set:async value=>Object.assign(pairHarness.persisted,value),remove:async key=>{delete pairHarness.persisted[key];}}}};
   globalThis.fetch=async(url,options)=>{
    pairHarness.requests.push(url);
    let value={};
@@ -1801,7 +1803,7 @@ test('stream client preserves split UTF-8 text and rejects a stream without comp
  const page=await browser.newPage();try{
   await page.goto('about:blank');
   await page.evaluate(()=>{
-   globalThis.chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})}}};
+   globalThis.chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)})},local:{get:async()=>({})}}};
    globalThis.progress=[];
    globalThis.makeResponse=complete=>{
     const payload=JSON.stringify({text:'繁體重點',done:false})+'\n'+(complete?JSON.stringify({text:'繁體重點完成',done:true})+'\n':'');
@@ -1819,5 +1821,108 @@ test('stream client preserves split UTF-8 text and rejects a stream without comp
   });
   assert.equal(result.result.text,'繁體重點完成');assert.deepEqual(result.progress,['繁體重點']);
   assert.equal(result.accept,'application/x-ndjson');assert.match(result.error,/尚未收到完整結果/);
+ }finally{await page.close();}
+});
+
+test('summary switches tabs mid-generation without duplicate work and copies source attribution',async()=>{
+ const page=await panelFixture();try{
+  await page.evaluate(()=>{
+   const query=chrome.tabs.query;
+   chrome.tabs.query=async q=>(await query(q)).map(tab=>({...tab,title:'Original <b>article</b>'}));
+   harness.summaryCalls=0;
+   QingReadLocal.request=(_path,options)=>new Promise(resolve=>{
+    harness.summaryCalls++;harness.summarySignal=options.signal;
+    harness.progress=options.onProgress;harness.finish=()=>resolve({text:'完整摘要'});
+   });
+   Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{harness.copied=text;}}});
+  });
+  await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
+  await page.waitForFunction(()=>Boolean(harness.progress));
+  await page.evaluate(()=>{harness.progress({text:'部分摘要'});harness.currentTab=8;harness.onActivated({tabId:8});});
+  assert.equal(await page.locator('#summary-result').textContent(),'部分摘要');
+  assert.equal(await page.locator('#summary-start').isDisabled(),true);
+  assert.equal(await page.evaluate(()=>harness.summarySignal.aborted),false);
+  await page.evaluate(()=>harness.finish());
+  assert.equal(await page.evaluate(()=>harness.summaryCalls),1);
+  assert.match(await page.locator('#summary-source').textContent(),/Original <b>article<\/b>/);
+  assert.equal(await page.locator('#summary-source b').count(),0);
+  await page.locator('#summary-copy').click();
+  assert.match(await page.evaluate(()=>harness.copied),/Original <b>article<\/b>[\s\S]*完整摘要/);
+ }finally{await page.close();}
+});
+
+for(const change of ['activated','url','removed'])test(`summary cancels source ${change} during extraction before submitting text`,async()=>{
+ const page=await panelFixture();try{
+  await page.evaluate(()=>{
+   const send=chrome.tabs.sendMessage;
+   chrome.tabs.sendMessage=(id,msg,options)=>msg.type==='qingread:summary-source'?new Promise(resolve=>{harness.releaseExtraction=()=>resolve({items:[{text:'Old source'}]});}):send(id,msg,options);
+   harness.submitted=false;QingReadLocal.request=async()=>{harness.submitted=true;return {text:'Unexpected'};};
+  });
+  await page.locator('[data-view=summary]').click();await page.locator('#summary-start').click();
+  await page.waitForFunction(()=>Boolean(harness.releaseExtraction));
+  await page.evaluate(change=>{
+   if(change==='activated')harness.onActivated({tabId:8});
+   else if(change==='url')harness.onUpdated(7,{url:'https://article.test/next'});
+   else harness.onRemoved(7);
+   harness.releaseExtraction();
+  },change);
+  assert.equal(await page.evaluate(()=>harness.submitted),false);
+  assert.equal(await page.locator('#summary-result').textContent(),'');
+  assert.equal(await page.locator('#summary-start').isEnabled(),true);
+ }finally{await page.close();}
+});
+
+test('workspace remembers an approved connection only when opted in and can forget it',async()=>{
+ const page=await pairingWorkspace('approved');try{
+  assert.equal(await page.locator('#remember-device').isChecked(),false);
+  await page.locator('#remember-device').check();await page.locator('#connect').click();
+  await page.waitForFunction(()=>document.querySelector('#pair-status').textContent.includes('配對完成'));
+  assert.equal(await page.evaluate(()=>pairHarness.persisted.rememberedCompanionToken),'b'.repeat(43));
+  await page.locator('#forget-device').click();
+  await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('已忘記'));
+  assert.deepEqual(await page.evaluate(()=>[pairHarness.saved,pairHarness.persisted]),[{},{}]);
+  assert.equal(await page.locator('#remember-device').isChecked(),false);
+  assert.equal(await page.locator('#health').textContent(),'尚未連線');
+ }finally{await page.close();}
+});
+
+for(const outcome of ['success','failed','cancelled'])test(`caption collapse handoff ${outcome} preserves ownership and never closes before readiness`,async()=>{
+ const page=await panelFixture();try{
+  await page.evaluate(()=>{
+   chrome.tabs.query=async()=>[{id:7,windowId:3,url:'https://article.test/'}];
+   chrome.tabs.sendMessage=async(id,message)=>{harness.messages.push(message);return message.type==='qingread:media-read'?{text:'Keep the backup.',version:1,timelineVersion:1}:{ok:true};};
+   harness.remoteCalls=[];harness.remoteState={active:false};
+   chrome.runtime={sendMessage:async message=>{
+    harness.remoteCalls.push(message.action);
+    if(message.action==='prepare')return new Promise(resolve=>{harness.prepared=resolve;});
+    if(message.action==='commit'){harness.remoteState={active:true,status:'字幕持續執行。'};return harness.remoteState;}
+    if(message.action==='collapse')return {closed:true};
+    if(message.action==='stop'){harness.remoteState={active:false,status:'已停止。'};return harness.remoteState;}
+    return harness.remoteState;
+   }};
+  });
+  await page.locator('[data-view=video]').click();await page.locator('#video-start').click();
+  await page.waitForFunction(()=>!document.querySelector('#video-collapse').disabled);
+  await page.locator('#video-collapse').click();await page.waitForFunction(()=>Boolean(harness.prepared));
+  assert.equal(await page.evaluate(()=>harness.destroyed),0);
+  assert.equal(await page.evaluate(()=>harness.remoteCalls.includes('collapse')),false);
+  if(outcome==='cancelled')await page.locator('#video-stop').click();
+  await page.evaluate(outcome=>harness.prepared(outcome==='failed'?{error:'背景引擎無法啟動。'}:{ready:true}),outcome);
+  if(outcome==='success'){
+   await page.waitForFunction(()=>harness.remoteCalls.includes('collapse'));
+   assert.equal(await page.evaluate(()=>harness.destroyed),1);
+   await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('pagehide'));});
+   assert.equal(await page.evaluate(()=>harness.remoteCalls.includes('stop')),false);
+   assert.equal(await page.evaluate(()=>harness.remoteCalls.filter(x=>x==='commit').length),1);
+  }else{
+   await page.waitForFunction(()=>document.querySelector('#video-background-status').textContent.includes('背景引擎無法啟動')||document.querySelector('#video-background-status').textContent.includes('已取消收合'));
+   assert.equal(await page.evaluate(()=>harness.remoteCalls.includes('commit')),false);
+   assert.equal(await page.evaluate(()=>harness.remoteCalls.includes('collapse')),false);
+   if(outcome==='failed'){
+    assert.equal(await page.evaluate(()=>harness.destroyed),0);
+    assert.equal(await page.locator('#video-stop').isEnabled(),true);
+    await page.locator('#video-stop').click();
+   }
+  }
  }finally{await page.close();}
 });

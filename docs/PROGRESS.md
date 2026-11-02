@@ -13,6 +13,54 @@
 
 六項清單已有實作，但使用者持續遇到錯誤，目前轉入穩定性修復，不以實作完成或測試數量代表產品可用性驗收完成。互動工作取消不等於 PDF 相容端點或 Whisper 的模型運算可立即停止，範圍與限制見各節。
 
+## 字幕側欄收合與背景工作（2026-11-02）
+
+**問題與使用方式：**原本 video.js 的 session、Translator、音訊軌與輪詢都依附側欄，visibilitychange 隱藏或 pagehide 銷毀即 stop；單純刪停止事件無法保證關閉後繼續。現在新增「收合側欄，繼續字幕」，兩階段交接成功才關閉介面。開始字幕 → 按收合 → 等背景接手 → 使用播放器全螢幕；影片右上角「停止清讀字幕」或重開清讀側欄均可停止。沒有交接就直接按側欄 × 仍按原規則停止。收合僅處理字幕，不承諾摘要、網頁或文字翻譯也移至背景。
+
+**檔案與資料流：**
+1. `video.js` 保存開始時 engine／source／mode／雙語／詞彙設定及來源 documentId；收合送 `qingread:video-control/prepare`。`video-background.js` 僅接受 panel.html 控制，檢查設定及目前來源分頁，建立 `video-offscreen.html`。
+2. `video-offscreen.js/prepare()` 在隱藏頁建立同一引擎。本機憑證以受限的 `qingread:video-host/token` 回覆取得，只交給外掛自身背景頁；不交給影片內容腳本。Chrome 語言包嘗試重建已準備的語言組合；失敗時回報，原側欄工作保留。未提交的引擎 20 秒後清除；取消、來源換頁或晚到引擎都清理。
+3. 背景 ready → 側欄停止自己的 session／音訊 → `commit(ticket)` 建立新的背景 session → `qingread:media-start` 在同一 documentId 啟動。語音模式透過 service worker 重新取得分頁音訊 ID，在 offscreen 建 AudioContext／AudioWorklet；交接時可能有短暫音訊／字幕空檔，不保證無縫。
+4. `video-clock.js` 專用 worker 每 250 ms 驅動共用 `video-pipeline.js`。原本字幕穩定、略過過期結果、雙語顯示、語音重疊去重與有限緩衝規則集中在 pipeline，側欄及背景共用，避免兩套版本漂移。背景透過受限訊息請 service worker 對固定 documentId 送 media-read／show；真正模型請求仍經 local-client.js 與助手。
+5. commit 成功才呼叫 `sidePanel.close`。重開側欄以 status 回復控制；`media-content.js` 在背景 session 顯示小型停止按鈕，與字幕一起移入播放器的 fullscreenElement。停止請求須通過 extension id、來源 tabId、documentId 及 session id 驗證，舊文件不能停止新工作。
+6. 停止／來源變更 → 終止 worker、abort 模型、停止音訊軌、關閉 AudioContext、移除字幕與按鈕並恢復原字幕 → 等模型清理完成 → 約 4 秒後檢查仍無工作才關閉 offscreen。建立與閒置關閉依序處理，避免舊清理關掉新準備的引擎。
+
+**架構依據與取捨：**[Chrome offscreen 文件](https://developer.chrome.com/docs/extensions/reference/api/offscreen) 說明隱藏頁只能使用 runtime 擴充 API，因此 tabs／storage／tabCapture 由背景腳本代辦，不能直接把側欄程式原封搬過去。manifest 新增 offscreen 權限，使用 WORKERS 與 USER_MEDIA 原因；不新增全網站常駐讀取。全外掛目前只允許一個背景字幕工作，第二次準備拒絕，不偷換另一部影片。[Chrome sidePanel.close](https://developer.chrome.com/docs/extensions/reference/api/sidePanel#method-close) 自 Chrome 141 提供；最低版本仍 138，舊版背景接手後明確提示手動按 ×。原生 `<video>` 自身的全螢幕不能容納 HTML 字幕，這次支援／驗證的是 YouTube 類型的播放器容器全螢幕。音訊背景架構參照 [Chrome 分頁音訊擷取](https://developer.chrome.com/docs/extensions/how-to/web-platform/screen-capture)，未改用麥克風或整台電腦錄音。
+
+**驗證與限制：**54 項 JavaScript 單元測試、118 項瀏覽器回歸通過。新增六例背景生命週期／權限測試，涵蓋只準備不觸碰來源、單次提交、取消晚到 Chrome 引擎、準備時來源變更、語音資源釋放／晚到音訊及非法請求拒絕；新增三例收合 UI 測成功、準備失敗仍保留字幕，以及交接中取消不得關側欄。既有影片、語音緩衝、正文、摘要、配對及 PDF 回歸全部保留。
+
+`tests/background-video-smoke.cjs` 已用人工模型及 `--live-model` 真正本機模型各通過一次：真實載入外掛／offscreen／worker，銷毀原控制頁後接收下一句雙語字幕，真實容器全螢幕內仍顯示，重開控制能讀回狀態，影片內停止移除字幕及控制，閒置背景頁釋放。報告 `test-results/background-video-smoke.json`（liveModel true）、畫面 `test-results/background-video-fullscreen.png`。影片 DOM 與字幕是人工資料，並未實際播放 YouTube；本機譯文品質不由這個生命週期測試保證。Chrome 語言包在 offscreen 的真實可用性、首次下載及語音真實音訊交接尚未驗收；單元測試的 Chrome 引擎和音訊軌是替身，不當作真實環境證據。
+
+第一輪整合測試發現 Playwright 的一般頁面路由不攔截 offscreen fetch，人工 token 因而被日常助手拒絕（401）；沒有取得日常配對憑證或送出模型工作。已修正測試：複製外掛到隔離目錄，只把固定 loopback 連接埠及 CSP 改為測試助手的隨機 port；正式外掛仍固定 8765。後續測試不使用日常助手資料。報告與臨時外掛／瀏覽器資料不納入 Git。
+
+**啟用與排錯：**重載外掛 → 重開側欄 → 刷新影片頁 → 開始字幕 → 按收合。按鈕停用先看字幕是否尚在準備；出現「目前 Chrome 無法在背景啟動這組語言包」時原字幕仍繼續，可保持側欄，或停止後手動選已配對本機模型再開始。背景接手後沒有自動收起，先看是否提示舊版手動按 ×；新版則檢查側欄是否屬於原視窗。只換全螢幕不應停止；同視窗切換另一分頁仍會停止。若重開側欄沒有背景狀態，檢查是否換址、關閉來源、外掛重新載入或瀏覽器重啟，這些不會自動恢復錄音。不要以刪除助手 config 或重新下載模型處理側欄問題。
+
+維護時依序查看 `video-background-status`（交接錯誤）→ `video-status`（引擎運行狀態）→ 擴充功能管理頁的 service worker／offscreen 錯誤。安全診斷可只查 `chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})` 確認是否存在背景頁，不列印 token／原文／Authorization。停止仍失敗可刷新來源頁，若背景資源仍殘留則重載外掛；音訊軌隨背景頁銷毀終止。若要改按鈕位置，改 media-content 的 positionControl，並一起驗證進出全螢幕及小播放器；若要調輪詢速度，需一起改 video.js 的側欄間隔及 video-clock.js 的背景間隔，重跑字幕舒適閱讀與最新句優先測試。只改其中一處會讓收合前後行為不同。
+
+測試命令：`npm.cmd test`、設定 CHROME_PATH 後 `npm.cmd run test:browser`，整合為 `node tests/background-video-smoke.cjs --live-model`。本輪未修改助手，未重跑 Python，也未重新打包發行版。
+
+## 摘要來源保留與記住配對（2026-11-02）
+
+**問題與行為：**使用者回報反覆配對、摘要耗時且切換分頁重來。先前為避免錯頁結果採用換頁即取消，卻使等待綁住閱讀。本輪將摘要定義為「擷取當時原文的快照」：尚未取得原文時換頁仍取消；取得後切換分頁、來源換址或關閉，都不取消推論、不清空部分／完成結果。來源名稱透過 textContent 顯示（不解讀網頁標題中的 HTML），複製時附上來源與範圍。開始下一份才取代上一份；目前不做多份歷史與背景持久化，關閉側欄仍會停止未完成工作。這節取代下方歷史紀錄中摘要一律換頁取消的政策，網頁翻譯與影片字幕仍按原規則取消。
+
+**摘要資料流：**`panel.html` 整理目前分頁摘要 → `summary.js` 取得來源 tabId、windowId、標題 → inject/send 的 `qingread:summary-source` 回傳段落 → 截取前 6,000 字元並設 `captured=true` → `local-client.js/request('/summarize', {managed:true})` → 本機助手工作 → 增量顯示 → 完成保留。`showSource()` 管理來源說明；`sourceMoved()` 及 onActivated 依 captured 判斷是否取消。停止與 pagehide 仍走原 AbortController／助手 DELETE；舊回應必須核對 task 身分。單份快照不需要重讀來源，因此生成完成時不再要求來源仍為目前分頁。
+
+**配對資料流：**`workspace.html` 預設不勾選「記住這台電腦」 → `workspace.js` 在一鍵／手動配對傳 remember → `local-client.js/pair()` 驗證 `/health` 後寫入 session.companionToken；只有 remember 為 true 才寫 local.rememberedCompanionToken。兩種 storage 的存取範圍都限制為 TRUSTED_CONTEXTS（外掛自身頁面，不含網頁內容腳本）。`savedToken()` 先查 session、沒有才查本機持久儲存；翻譯、摘要等共用此入口，沒有新增雲端請求、同步或文章儲存。
+
+`rememberDevice(true)` 會重新驗證目前憑證；未配對時只保留勾選供下一次配對使用，不憑空保存。取消勾選時把有效憑證保留於 session 再刪除 local，避免立刻斷線；`forgetDevice()` 清掉兩者。工作室的 connectionEpoch 阻止清除後晚到的 health／jobs 回覆把畫面恢復成已連線。credentialRevision 使同一頁中舊的驗證結果失效，credentialWrites 依序完成儲存操作，避免先前延遲寫入蓋過後來清除。這不是助手的全域撤銷；已帶憑證送出的請求仍可能完成，也不會改動其他 Chrome 設定檔或助手 config.json。持久儲存不等於作業系統加密憑證庫，因此預設關閉且提供清除入口。
+
+**速度與邊界：**這輪不調模型、不改雲端、不改 180 秒預算，改善的是等待期間可做其他事。尚未實作關閉側欄後復原、瀏覽器重啟後復原摘要、並行多份摘要或助手自動啟動。原始標題／主機名僅用於來源標示，並非摘要正確性的保證。切回來源頁也不會把快照改成最新內容，要更新需主動開始下一份。
+
+**排錯順序：**先重載外掛並重開側欄／工作室，避免舊腳本還在記憶體。摘要若換頁即停止，確認換頁前是否已顯示「依開始時擷取的原文整理」；仍是「正在擷取」時停止屬預期。若讀取完成後停止，檢查側欄是否被關閉／重新建立，再查 summary 的 captured 與 task 身分；不要先放寬網站授權。記住後仍要求配對時先確認相同 Chrome 設定檔、勾選狀態與助手已啟動，再檢查 health 是否為 401（助手憑證更換）或無法連線；401 可重新配對，無法連線應先啟動助手。不要把配對碼、storage 內容或 Authorization 標頭貼進 log／截圖。清除保存請用「忘記這台電腦」，不用刪助手資料或模型。
+
+**自行修改例：**要調摘要最多讀取字數，需一起改 `summary.js` 的切字／範圍說明、`panel.html` 提示，以及助手輸入限制與對應測試，不能只改畫面。若想改成關閉側欄也繼續，不能只刪 pagehide：需要將工作管理移到背景、保存工作 ID／來源／部分結果並處理重新連線；這屬下一階段架構變更。配對新增儲存方式時統一改 savedToken／pair／rememberDevice／forgetDevice，避免其他功能仍只查 session。
+
+**驗證：**48 項 JavaScript 單元測試、115 項完整瀏覽器測試通過。首輪三個工作室／PDF fixture 尚未提供新增的 storage.local，造成等待逾時；補齊測試環境後完整回歸通過，未放寬正式程式的儲存要求。隔離 Chromium 真正關閉再開啟，session 為空時能使用已保存憑證，忘記後重載仍維持未連線；報告 test-results/pairing-restart.json。正式助手／既有 Gemma 3 4B 以經濟部公開 DOM 快照測得 42.843 秒完成 197 字元摘要；生成途中用原生分頁切換及 history.pushState 變更來源網址，沒有送出 DELETE 且摘要完成。並驗證快取、主動停止、停止後重試、模擬斷線恢復，以及網頁／影片仍遵守換頁取消；報告 test-results/moea-stability-smoke.json。這不等於使用者日常側欄、原生配對同意視窗、摘要品質或所有網站已全面驗收。測試入口為 `npm.cmd test`、設定 CHROME_PATH 後 `npm.cmd run test:browser`，另有 `node tests/pairing-restart.cjs`（隔離 Chromium 真正關閉再開啟；HTTP 為人工回應、不模擬原生同意視窗），以及 `node tests/stability-smoke.cjs --live-model --article-snapshot test-results/moea-article-snapshot.json`（真實助手／模型與公開 DOM 快照）。助手程式未修改，未重跑 Python。
+
+最後另跑 22 項摘要相關瀏覽器測試，確認停止／讀取失敗後來源提示不再停留於「正在擷取」，全部通過。
+
+**前次版控阻擋紀錄：**此批第一次提交因自動核准服務用量上限未執行，當時最後提交為 `608e66e`。核准流程現已可用，本輪收尾與字幕背景收合成果一併保存；實際提交以 `git log -1 --oneline` 核對。不要用 reset／clean 清掉未提交成果；目前沒有遠端備份。
+
 ## 經濟部整頁表單正文誤排除（2026-11-02）
 
 回報頁：[經濟部科技新知文章](https://www.moea.gov.tw/MNS/doit/industrytech/IndustryTech.aspx?menu_id=13545&it_id=563#top)。使用者看到「沒有讀到正文。請先展開要閱讀的內容再試」。此訊息由 `summary.js` 在 `batch.items` 沒有可用文字時產生，尚未呼叫摘要模型。最初測試瀏覽器遭網站 403 阻擋，不能用它推論使用者也遭阻擋；取得使用者對瀏覽工具的網站存取授權後，已成功讀取實際頁面並確認原因。

@@ -2,6 +2,11 @@
 (() => {
   const el = id => document.getElementById(id);
   let task = null, sourceTabId = null, sourceWindowId = null, accessTarget = null;
+  let captured = false, sourceLabel = '', sourceChanged = false;
+  function showSource() {
+    el('summary-source').hidden = !sourceLabel;
+    el('summary-source').textContent = sourceLabel ? `摘要來源：${sourceLabel}。${captured ? '依開始時擷取的原文整理，可切換分頁。' : task ? '正在擷取原文。' : '原文尚未擷取完成。'}${sourceChanged ? '下方保留的是上述來源的原文快照，不會隨網頁更新。' : ''}` : '';
+  }
   function revealResult() {
     const output = el('summary-output');
     if (!output.hidden && !output.closest('[data-page]').hidden && !document.hidden) {
@@ -12,7 +17,7 @@
     const old = task;
     const wasRunning=Boolean(task);
     clearInterval(task?.timer);
-    task?.controller.abort(); task = null;
+    task?.controller.abort(); task = null; showSource();
     el('summary-start').disabled = false; el('summary-stop').disabled = true;
     el('summary-status').textContent = message + (wasRunning && el('summary-result').textContent ? ' 下方是尚未完成的部分摘要。' : '');
     if(old?.request){
@@ -22,6 +27,7 @@
     }
   }
   function clear() {
+    captured=false;sourceLabel='';sourceChanged=false;showSource();
     accessTarget = null; el('summary-grant').hidden = true;
     el('summary-site-entry').hidden=true;el('summary-site-url').value='';
     stop('頁面已變更，請重新整理摘要。'); sourceTabId = null; sourceWindowId = null;
@@ -31,6 +37,7 @@
   el('summary-start').onclick = async () => {
     if (task) return;
     const job = {controller: new AbortController(), tabId: null}; task = job;
+    captured=false;sourceLabel='';sourceChanged=false;showSource();
     accessTarget = null; el('summary-grant').hidden = true;
     el('summary-site-entry').hidden=true;el('summary-site-url').value='';
     el('summary-start').disabled = true; el('summary-stop').disabled = false;
@@ -41,6 +48,8 @@
       const tab = await activeTab();
       if (task !== job) return;
       job.tabId = tab.id; sourceTabId = tab.id; sourceWindowId = tab.windowId;
+      let host='';try{host=new URL(tab.url).hostname;}catch{}
+      sourceLabel=(tab.title || host || `分頁 ${tab.id}`).slice(0,200);showSource();
       const target = await inject(tab);
       if (task !== job) return;
       const batch = await send(target, {type:'qingread:summary-source', job:crypto.randomUUID(), scope:'page'});
@@ -53,6 +62,7 @@
       const text = points.slice(0,6000).join('');
       const coverage = `${partial ? '部分內容：' : '本次擷取內容：'}${Math.min(points.length,6000)} 字元${partial ? (batch.frames?.length ? '（未包含內嵌頁面，未涵蓋全文）' : '（達到上限，未涵蓋全文）') : ''}`;
       if (task !== job) return;
+      captured=true;showSource();
       el('summary-status').textContent = coverage + '。本機模型讀取原文中，產生文字後會立即顯示…';
       const started = Date.now();
       job.timer = setInterval(() => {
@@ -68,19 +78,13 @@
       }});
       const result = await job.request;
       if (task !== job) return;
-      // currentWindow can change when another Chrome window gains focus.
-      const current = Number.isInteger(tab.windowId)
-        ? (await chrome.tabs.query({active:true,windowId:tab.windowId}))[0] : await activeTab();
-      if (task !== job) return;
-      if (current?.id !== tab.id) {
-        clear(); el('summary-status').textContent = '來源分頁已變更，這次摘要未顯示。請在要閱讀的分頁重新整理摘要。';
-        return;
-      }
+      // Once captured, the source is immutable. Results belong to that snapshot,
+      // regardless of the user's active tab, navigation or closing the source.
       if (typeof result?.text !== 'string' || !result.text.trim()) throw new Error('模型沒有回傳摘要。');
       el('summary-result').textContent = result.text;
       el('summary-output').hidden = false;
       el('summary-copy').disabled = false;
-      el('summary-status').textContent = (result.truncated ? '已達輸出上限，下方是部分摘要。' : result.cached ? '摘要已完成，沿用相同內容與模型的近期結果。' : '摘要已完成，請看「本頁摘要」。') + coverage + '。摘要可能有遺漏或誤解，請對照原文。';
+      el('summary-status').textContent = (result.truncated ? '已達輸出上限，下方是部分摘要。' : result.cached ? '摘要已完成，沿用相同內容與模型的近期結果。' : '摘要已完成，請看「摘要結果」。') + coverage + '。摘要可能有遺漏或誤解，請對照原文。';
       revealResult();
     } catch (error) {
       if (task === job) {
@@ -96,7 +100,7 @@
       }
     } finally {
       clearInterval(job.timer);
-      if (task === job) { task = null; el('summary-start').disabled = false; el('summary-stop').disabled = true; }
+      if (task === job) { task = null; showSource(); el('summary-start').disabled = false; el('summary-stop').disabled = true; }
     }
   };
   el('summary-stop').onclick = () => stop();
@@ -125,18 +129,23 @@
     catch{el('summary-grant').textContent='檢查網站存取';}
   });
   el('summary-copy').onclick = async () => {
-    try { await navigator.clipboard.writeText(el('summary-status').textContent + '\n\n' + el('summary-result').textContent); }
+    try { await navigator.clipboard.writeText(el('summary-source').textContent + '\n' + el('summary-status').textContent + '\n\n' + el('summary-result').textContent); }
     catch { el('summary-status').textContent = '複製未成功，可直接反白摘要文字複製。'; }
   };
   chrome.tabs.onActivated.addListener(info => {
     if (Number.isInteger(sourceWindowId) && Number.isInteger(info.windowId) && info.windowId !== sourceWindowId) return;
-    if (info.tabId !== sourceTabId) clear();
+    if(captured){sourceChanged ||= info.tabId!==sourceTabId;showSource();}
+    else if (info.tabId !== sourceTabId) clear();
   });
-  // SPA navigation may update only the URL, without reloading the document.
-  chrome.tabs.onUpdated.addListener((id, change) => { if ((change.status === 'loading' || change.url) && id === sourceTabId) clear(); });
-  chrome.tabs.onRemoved?.addListener(id => { if (id === sourceTabId) clear(); });
+  function sourceMoved(id) {
+    if(id!==sourceTabId)return;
+    if(captured){sourceChanged=true;showSource();}else clear();
+  }
+  chrome.tabs.onUpdated.addListener((id, change) => { if (change.status === 'loading' || change.url) sourceMoved(id); });
+  chrome.tabs.onRemoved?.addListener(sourceMoved);
   window.addEventListener('pagehide', () => stop());
-  // Temporary hiding does not invalidate captured text. Page/tab changes and explicit stop still cancel.
+  // Hiding or browsing elsewhere keeps captured work alive; explicit stop and
+  // destruction of this panel still cancel. No cross-panel persistence is implied.
   document.addEventListener('visibilitychange', revealResult);
   document.querySelector('[data-view="summary"]').addEventListener('click', revealResult);
 })();

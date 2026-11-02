@@ -67,14 +67,27 @@ const {spawn}=require('node:child_process');
     report.checks.push('unpaired: no source submission');
     // Inject a test credential into the isolated session, not the user's pairing data.
     await panel.evaluate(()=>chrome.storage.session.set({companionToken:'a'.repeat(43)}));
-    async function summarize(label){
+    async function summarize(label, browseAway=false){
       const start=Date.now();await click('#summary-start');
+      let other;
+      const baseline=requests.length;
+      if(browseAway){
+        await panel.waitForFunction(()=>document.querySelector('#summary-source').textContent.includes('可切換分頁'));
+        other=await context.newPage();await other.goto('about:blank');await other.bringToFront();
+        await article.evaluate(()=>history.pushState({},'','#reading-elsewhere'));
+      }
       await panel.waitForFunction(()=>document.querySelector('#summary-stop').disabled,null,{timeout:190000});
       assert.match(await panel.locator('#summary-status').textContent(),/摘要已完成/);
       const text=await panel.locator('#summary-result').textContent();assert.ok(text.length>20);
       report.checks.push({label,seconds:(Date.now()-start)/1000,characters:text.length});
+      if(browseAway){
+        assert.match(await panel.locator('#summary-source').textContent(),/原文快照/);
+        assert.equal(requests.slice(baseline).some(item=>item.method==='DELETE'),false);
+        report.checks.push('summary: native tab switch and source URL change preserve captured work without cancellation');
+        await other.close();await article.bringToFront();
+      }
     }
-    await summarize(snapshot?'MOEA observed article DOM: complete summary':'public NTTU article: complete summary');
+    await summarize(snapshot?'MOEA observed article DOM: complete summary':'public NTTU article: complete summary',true);
     if(snapshot){
       report.articleCoverage=await panel.locator('#summary-status').textContent();
       await panel.screenshot({path:path.join(results,'moea-summary.png'),fullPage:true});

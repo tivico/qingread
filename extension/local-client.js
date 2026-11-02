@@ -1,6 +1,46 @@
 'use strict';
 globalThis.QingReadLocal = {
   TIMEOUT_MS: 180000,
+  credentialRevision: 0,
+  credentialWrites: Promise.resolve(),
+  writeCredentials(action) {
+    const pending=this.credentialWrites.then(action);
+    this.credentialWrites=pending.catch(()=>{});
+    return pending;
+  },
+  async savedToken() {
+    const revision=this.credentialRevision;
+    const session=await chrome.storage.session.get('companionToken');
+    if(revision!==this.credentialRevision)return;
+    if(session.companionToken)return session.companionToken;
+    if(!chrome.storage.local)return;
+    await chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
+    const saved=await chrome.storage.local.get('rememberedCompanionToken');
+    if(revision===this.credentialRevision && /^[A-Za-z0-9_-]{30,100}$/.test(saved.rememberedCompanionToken || ''))return saved.rememberedCompanionToken;
+  },
+  async rememberDevice(enabled) {
+    const revision=++this.credentialRevision;
+    if(!enabled)return this.writeCredentials(async()=>{
+      if(revision!==this.credentialRevision)return false;
+      const token=await this.savedToken();
+      if(token)await chrome.storage.session.set({companionToken:token});
+      await chrome.storage.local.remove('rememberedCompanionToken');
+      return true;
+    });
+    const token=await this.savedToken();
+    if(!token)return false;
+    await this.request('/health',{token});
+    return this.writeCredentials(async()=>{
+      if(revision!==this.credentialRevision)return false;
+      await chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
+      await chrome.storage.local.set({rememberedCompanionToken:token});
+      return true;
+    });
+  },
+  async forgetDevice() {
+    this.credentialRevision++;
+    await this.writeCredentials(()=>Promise.all([chrome.storage.session.remove('companionToken'),chrome.storage.local.remove('rememberedCompanionToken')]));
+  },
   stageText(event) {
     return ({queued:'正在排隊，等候本機模型…',reading:'本機模型正在處理原文…',generating:'本機模型正在產生結果…',cancelling:'正在取消本機工作，等候釋放模型…'})[event.stage] || '';
   },
@@ -26,7 +66,7 @@ globalThis.QingReadLocal = {
       : value.message || '助手未能完成配對，請稍後重試。');
     return value;
   },
-  async connect({signal,onPending} = {}) {
+  async connect({signal,onPending,remember=false} = {}) {
     const nonce = Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,'0')).join('');
     let request, paired = false;
     try {
@@ -47,7 +87,7 @@ globalThis.QingReadLocal = {
         if(result.state==='pending')continue;
         if(result.state==='approved'){
           if(signal?.aborted)throw new DOMException('Stopped','AbortError');
-          await this.pair(result.token,{signal}); paired=true; return;
+          await this.pair(result.token,{signal,remember}); paired=true; return;
         }
         throw new Error(({denied:'已拒絕或未在時間內確認；尚未配對。可再按連接。',expired:'配對已逾時，請重新按連接。',cancelled:'已取消配對。',unavailable:'無法開啟助手確認視窗，請使用下方手動配對。'})[result.state] || '配對未完成，請重新按連接。');
       }
@@ -56,17 +96,30 @@ globalThis.QingReadLocal = {
       if(request?.id && !paired)void this.pairingRequest('cancel',{id:request.id,nonce}).catch(()=>{});
     }
   },
-  async pair(token, {signal} = {}) {
+  async pair(token, {signal,remember=false} = {}) {
+    const revision=++this.credentialRevision;
     if (!/^[A-Za-z0-9_-]{30,100}$/.test(token)) throw new Error('請輸入助手視窗中的完整配對碼。');
     await chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     await this.request('/health', { token, signal });
-    if(signal?.aborted)throw new DOMException('Stopped','AbortError');
-    await chrome.storage.session.set({ companionToken: token });
+    if(signal?.aborted || revision!==this.credentialRevision)throw new DOMException('Stopped','AbortError');
+    await this.writeCredentials(async()=>{
+      if(signal?.aborted || revision!==this.credentialRevision)throw new DOMException('Stopped','AbortError');
+      await chrome.storage.session.set({ companionToken: token });
+      if(remember){
+        await chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
+        await chrome.storage.local.set({rememberedCompanionToken:token});
+      }else await chrome.storage.local?.remove?.('rememberedCompanionToken');
+      if(signal?.aborted){
+        await chrome.storage.session.remove('companionToken');
+        await chrome.storage.local?.remove?.('rememberedCompanionToken');
+        throw new DOMException('Stopped','AbortError');
+      }
+    });
   },
   async request(path, { body, method, signal, token, binary = false, onProgress, managed = false, keepalive = false, clientId } = {}) {
     if (managed) return this.runInference(path, {body,signal,token,onProgress});
     if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
-    token ||= (await chrome.storage.session.get('companionToken')).companionToken;
+    token ||= await this.savedToken();
     if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
     if (!token) throw new Error('請先開啟「PDF 與助手設定」完成配對。');
     const headers = { Authorization: `Bearer ${token}` };
@@ -124,7 +177,7 @@ globalThis.QingReadLocal = {
   },
   async runInference(path, {body,signal,token,onProgress}) {
     if (signal?.aborted) throw new DOMException('Stopped','AbortError');
-    token ||= (await chrome.storage.session.get('companionToken')).companionToken;
+    token ||= await this.savedToken();
     if (signal?.aborted) throw new DOMException('Stopped','AbortError');
     if (!token) throw new Error('請先開啟「PDF 與助手設定」完成配對。');
     const kind = ({'/translate':'translate','/summarize':'summarize','/explain':'explain'})[path];

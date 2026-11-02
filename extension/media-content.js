@@ -6,6 +6,29 @@
   let displayed = null, pending = null, emptySince = null, bilingual = false, sizeObserver;
   const cueHistory = new Map();
   let sourceStyle = null, mutedSource = null;
+  let backgroundControl=null;
+  function positionControl(){
+    if(!backgroundControl||!video?.isConnected)return;
+    const parent=document.fullscreenElement||document.documentElement;
+    if(parent.tagName!=='VIDEO'&&backgroundControl.parentNode!==parent)parent.append(backgroundControl);
+    const rect=video.getBoundingClientRect();
+    Object.assign(backgroundControl.style,{top:Math.max(8,rect.top+12)+'px',right:Math.max(8,innerWidth-rect.right+12)+'px'});
+  }
+  function addBackgroundControl(){
+    backgroundControl?.remove();backgroundControl=document.createElement('div');
+    backgroundControl.dataset.qingreadBackground='true';
+    backgroundControl.style.cssText='position:fixed;z-index:2147483647';
+    const shadow=backgroundControl.attachShadow({mode:'closed'}),button=document.createElement('button'),style=document.createElement('style');
+    style.textContent='button{font:13px system-ui;color:white;background:#162520c9;border:1px solid #ffffff80;border-radius:8px;padding:6px 10px;cursor:pointer;opacity:.65}button:hover,button:focus-visible{opacity:1}';
+    button.textContent='停止清讀字幕';
+    button.onclick=async()=>{
+      const control=backgroundControl;
+      button.disabled=true;
+      try{const result=await chrome.runtime.sendMessage({type:'qingread:video-stop-overlay',session});if(result?.error)throw new Error(result.error);if(backgroundControl===control){control?.remove();backgroundControl=null;}}
+      catch{button.disabled=false;button.textContent='停止未成功，請重開清讀';}
+    };
+    shadow.append(style,button);positionControl();
+  }
   const normalize = text => text.replace(/\s+/gu, ' ').trim().slice(0,6000);
   let hoverEnabled = false, hoverTimer, word = '', wordVersion = 0, point = {x:0,y:0}, tooltip;
   function clearWord() {
@@ -70,6 +93,7 @@
     return false;
   }
   function position() {
+    positionControl();
     if (!box || !video?.isConnected) return;
     const parent = document.fullscreenElement || document.documentElement;
     // A fullscreen <video> cannot render HTML children; custom-player containers can.
@@ -141,18 +165,22 @@
   }, {passive:true});
   document.addEventListener('keyup', event => { if (event.key === 'Alt') clearWord(); });
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
-    if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('panel.html')) return;
+    const fromPanel=sender.url===chrome.runtime.getURL('panel.html');
+    const fromBackground=sender.url===chrome.runtime.getURL('background.js')&&message.type?.startsWith('qingread:media-');
+    if (sender.id !== chrome.runtime.id || (!fromPanel&&!fromBackground)) return;
     if (message.type === 'qingread:media-start') {
       remove(); sizeObserver?.disconnect(); video = visibleVideo(); session = message.session; mode = message.mode;
+      backgroundControl?.remove();backgroundControl=null;
       bilingual = message.bilingual === true; cueHistory.clear(); lastCue = ''; emptySince = null; cueVersion++;
       videoEvents?.abort(); videoEvents = new AbortController(); timelineVersion++;
       if (video) {
         for (const event of ['seeking','emptied','ended','loadstart']) video.addEventListener(event, invalidateTimeline, {signal:videoEvents.signal});
         video.addEventListener('pause', () => { if (mode === 'speech') invalidateTimeline(); }, {signal:videoEvents.signal});
         sizeObserver = new ResizeObserver(position); sizeObserver.observe(video);
+        if(fromBackground&&message.background)addBackgroundControl();
       }
       reply({ ok: Boolean(video), error: video ? null : '找不到目前頁面的影片。跨網站內嵌影片可能不支援。' });
-    } else if (message.type === 'qingread:media-stop' && message.session === session) { session = null; videoEvents?.abort(); sizeObserver?.disconnect(); remove(); reply({ok:true}); }
+    } else if (message.type === 'qingread:media-stop' && message.session === session) { session = null; videoEvents?.abort(); sizeObserver?.disconnect(); backgroundControl?.remove();backgroundControl=null;remove(); reply({ok:true}); }
     else if (message.type === 'qingread:media-read' && message.session === session) reply(readCue());
     else if (message.type === 'qingread:media-show' && message.session === session) {
       if (mode === 'captions') readCue();
