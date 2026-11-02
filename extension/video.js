@@ -1,14 +1,15 @@
 'use strict';
 (() => {
   const el = id => document.getElementById(id);
-  let session = null, hoverTarget = null, hoverBusy = false, hoverVersion = -1, hoverEpoch = 0;
+  let session = null, hoverTarget = null, hoverLookup = null, hoverVersion = -1, hoverEpoch = 0;
   const say = text => { if (el('video-status').textContent !== text) el('video-status').textContent = text; };
   const send = (target,message) => chrome.tabs.sendMessage(target.tabId,message,{documentId:target.documentId}).catch(()=>{throw new DOMException('Receiver unavailable','PageReadError');});
   let accessError = null;
   const mediaError = error => /^(Page|Extension)/.test(error.name) ? QingReadCore.errorText(error) : error.name === 'Error' ? error.message : QingReadCore.errorText(error);
   el('video-access').onclick = () => {document.querySelector('[data-view=web]').click();if(accessError)showFailure(accessError,{stage:'page-read'});};
-  async function target() {
+  async function target(check = () => {}) {
     const tab = await activeTab();
+    check(tab);
     return inject(tab, 'media-content.js');
   }
   function stop(reason='字幕已停止。') {
@@ -159,7 +160,7 @@
       const permission=(s.mode==='speech'?chrome.permissions.request({permissions:['tabCapture']}):Promise.resolve(true)).then(granted=>({granted}),error=>({error}));
       s.creation=Promise.resolve(el('engine').value==='local'?QingReadLocal.translator(s.source):globalThis.Translator?.create({sourceLanguage:s.source,targetLanguage:'zh-Hant',signal:s.controller.signal})).then(translator=>({translator}),error=>({error}));
       // Detect page access failure before waiting on model downloads.
-      s.target=await target();live(s);
+      s.target=await target(tab=>{live(s);s.tabId=tab.id;s.windowId=tab.windowId;});live(s);
       const permitted=await permission;live(s);if(permitted.error)throw permitted.error;
       if(!permitted.granted)throw new Error('需要分頁音訊權限才能進行語音辨識。');
       const created=await waitForEngine(s.creation,s);live(s);
@@ -191,28 +192,42 @@
   el('start').addEventListener('click',()=>{if(session)stop('開始網頁翻譯，已停止字幕。');});
   el('text-start').addEventListener('click',()=>{if(session)stop('開始文字翻譯，已停止字幕。');});
   el('test-engine').addEventListener('click',()=>{if(session)stop('測試翻譯引擎，已停止字幕。');});
-  async function disableHover(){hoverEpoch++;const old=hoverTarget;hoverTarget=null;hoverVersion=-1;el('hover').checked=false;if(old)await send(old,{type:'qingread:hover-enable',enabled:false}).catch(()=>{});}
+  async function disableHover(){
+    hoverEpoch++;const old=hoverTarget;hoverTarget=null;hoverVersion=-1;
+    hoverLookup?.controller.abort();hoverLookup=null;
+    el('hover').checked=false;
+    if(old)await send(old,{type:'qingread:hover-enable',enabled:false}).catch(()=>{});
+  }
   el('hover').onchange=async()=>{
     if(!el('hover').checked){await disableHover();return;}
     const epoch=++hoverEpoch;
-    try {await QingReadLocal.request('/health');if(epoch!==hoverEpoch)return;const next=await target();if(epoch!==hoverEpoch)return;hoverTarget=next;await send(hoverTarget,{type:'qingread:hover-enable',enabled:true});say('按住 Alt，將滑鼠停在英文單字上。');}
-    catch(error){await disableHover();say(error.message);}
+    try {
+      await QingReadLocal.request('/health');if(epoch!==hoverEpoch)return;
+      const next=await target(()=>{if(epoch!==hoverEpoch)throw new DOMException('Stopped','AbortError');});
+      if(epoch!==hoverEpoch)return;hoverTarget=next;
+      await send(next,{type:'qingread:hover-enable',enabled:true});
+      if(epoch===hoverEpoch)say('按住 Alt，將滑鼠停在英文單字上。');
+    }catch(error){if(epoch===hoverEpoch){void disableHover();say(mediaError(error));}}
   };
   setInterval(async()=>{
-    if(!hoverTarget || hoverBusy)return;
-    hoverBusy=true;const current=hoverTarget;
+    if(!hoverTarget || hoverLookup)return;
+    const current=hoverTarget,epoch=hoverEpoch,lookup={controller:new AbortController()};
+    hoverLookup=lookup;
+    const isCurrent=()=>current===hoverTarget && epoch===hoverEpoch && hoverLookup===lookup;
     try {
       const result=await send(current,{type:'qingread:hover-read'});
-      if(!result?.word || result.version===hoverVersion)return;hoverVersion=result.version;
-      const answer=await QingReadLocal.request('/explain',{body:{text:result.word,source:'en'},managed:true});
-      if(current===hoverTarget)await send(current,{type:'qingread:hover-show',version:result.version,text:answer.text});
-    }catch(error){say(error.message);}finally{hoverBusy=false;}
+      if(!isCurrent() || !result?.word || result.version===hoverVersion)return;hoverVersion=result.version;
+      const answer=await QingReadLocal.request('/explain',{body:{text:result.word,source:'en'},managed:true,signal:lookup.controller.signal});
+      if(isCurrent())await send(current,{type:'qingread:hover-show',version:result.version,text:answer.text});
+    }catch(error){if(isCurrent() && error.name!=='AbortError')say(mediaError(error));}
+    finally{if(hoverLookup===lookup)hoverLookup=null;}
   },600);
   chrome.tabs.onActivated.addListener(info=>{
-    if(session && (!Number.isInteger(session.target?.windowId) || info.windowId===session.target.windowId))stop('切換分頁，已停止字幕。');
+    if(session && (!Number.isInteger(session.windowId) || info.windowId===session.windowId))stop('切換分頁，已停止字幕。');
     if(!Number.isInteger(hoverTarget?.windowId) || info.windowId===hoverTarget.windowId)void disableHover();
   });
-  chrome.tabs.onUpdated.addListener((id,change)=>{if(change.status==='loading'){if(session?.target?.tabId===id)stop('頁面重新載入，已停止字幕。');if(hoverTarget?.tabId===id)void disableHover();}});
+  chrome.tabs.onUpdated.addListener((id,change)=>{if(change.status==='loading'||change.url){if(session?.tabId===id)stop('來源頁面已變更，已停止字幕。');if(hoverTarget?.tabId===id)void disableHover();}});
+  chrome.tabs.onRemoved?.addListener(id=>{if(session?.tabId===id)stop('來源分頁已關閉，已停止字幕。');if(hoverTarget?.tabId===id)void disableHover();});
   window.addEventListener('pagehide',()=>{stop();void disableHover();});
   document.addEventListener('visibilitychange',()=>{if(document.hidden){if(session)stop('側邊欄已隱藏，已停止字幕。');void disableHover();}});
 })();

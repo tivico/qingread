@@ -142,7 +142,7 @@ async function start() {
   $('progress').value = 0;
   status('正在準備本機翻譯…', '首次使用可能需要下載語言包。請保持側邊欄開啟；下載期間可以停止。');
   try {
-    const tabResult = activeTab().then(tab => { job.tabId = tab.id; return { tab }; }, error => ({ error }));
+    const tabResult = activeTab().then(tab => { job.tabId = tab.id; job.windowId = tab.windowId; return { tab }; }, error => ({ error }));
     // Call create directly inside the click handler, before awaiting other APIs.
     // Chrome may require transient user activation to download a language pack.
     job.creation = Promise.resolve(createTranslator(job,source)).then(translator=>({translator}),error=>({error}));
@@ -259,10 +259,11 @@ for (const id of ['source', 'scope', 'terms', 'engine']) {
   });
 }
 // Pasted-text jobs never read a page, so another tab cannot invalidate them.
-chrome.tabs.onActivated.addListener(info => { if (Number.isInteger(running?.target?.windowId) && info.windowId !== running.target.windowId) return; if (running && running.kind !== 'text') cancel('已切換分頁，翻譯已停止。'); });
+chrome.tabs.onActivated.addListener(info => { if (Number.isInteger(running?.windowId ?? running?.target?.windowId) && info.windowId !== (running.windowId ?? running.target.windowId)) return; if (running && running.kind !== 'text') cancel('已切換分頁，翻譯已停止。'); });
 chrome.tabs.onUpdated.addListener((id, change) => {
-  if (running && change.status === 'loading' && id === running.tabId) cancel('頁面已重新載入，翻譯已停止。');
+  if (running && (change.status === 'loading' || change.url) && id === running.tabId) cancel('來源頁面已變更，翻譯已停止。');
 });
+chrome.tabs.onRemoved?.addListener(id => { if (running?.tabId === id) cancel('來源分頁已關閉，翻譯已停止。'); });
 window.addEventListener('pagehide', () => cancel('側邊欄已關閉。'));
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') cancel('側邊欄已隱藏，翻譯已停止。');

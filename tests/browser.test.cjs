@@ -416,6 +416,91 @@ test('disabling hover clears pending word lookup and stale words when moving to 
   }finally{await page.close();}
 });
 
+test('turning hover off aborts the lookup and a new session does not wait for its stale response',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      harness.lookups=[];
+      QingReadLocal.request=async(path,options)=>{
+        if(path==='/health')return {};
+        return new Promise((resolve,reject)=>harness.lookups.push({signal:options.signal,resolve,reject}));
+      };
+      chrome.tabs.sendMessage=async(_id,message)=>{
+        harness.messages.push(message);
+        return message.type==='qingread:hover-read'?{word:'backup',version:1}:{ok:true};
+      };
+    });
+    await page.locator('[data-view=video]').click();await page.locator('#hover').check();
+    await page.waitForFunction(()=>harness.lookups.length===1);
+    await page.locator('#hover').uncheck();
+    assert.equal(await page.evaluate(()=>harness.lookups[0].signal?.aborted),true);
+    await page.locator('#hover').check();
+    await page.waitForFunction(()=>harness.lookups.length===2);
+    await page.evaluate(()=>harness.lookups[0].reject(new Error('Stale lookup error')));
+    assert.doesNotMatch(await page.locator('#video-status').textContent(),/Stale lookup error/);
+    await page.waitForTimeout(700);
+    assert.equal(await page.evaluate(()=>harness.lookups.length),2,'Old cleanup must not release the new lookup lock');
+    await page.evaluate(()=>harness.lookups[1].resolve({text:'備份'}));
+    await page.waitForFunction(()=>harness.messages.some(m=>m.type==='qingread:hover-show'));
+    assert.deepEqual(await page.evaluate(()=>harness.messages.filter(m=>m.type==='qingread:hover-show').map(m=>m.text)),['備份']);
+  }finally{await page.close();}
+});
+
+test('a hover read returning after disable never submits a word to the model',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      harness.lookups=0;
+      QingReadLocal.request=async(path)=>{if(path==='/explain')harness.lookups++;return {};};
+      chrome.tabs.sendMessage=async(_id,message)=>message.type==='qingread:hover-read'
+        ?new Promise(resolve=>{harness.finishRead=()=>resolve({word:'backup',version:1});}):{ok:true};
+    });
+    await page.locator('[data-view=video]').click();await page.locator('#hover').check();
+    await page.waitForFunction(()=>Boolean(harness.finishRead));await page.locator('#hover').uncheck();
+    await page.evaluate(async()=>{harness.finishRead();await new Promise(resolve=>setTimeout(resolve,0));});
+    assert.equal(await page.evaluate(()=>harness.lookups),0);
+  }finally{await page.close();}
+});
+
+test('a stale hover setup failure cannot disable a newly enabled session',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      let first=true;
+      QingReadLocal.request=async()=>{
+        if(first){first=false;return new Promise((_resolve,reject)=>{harness.failOldSetup=()=>reject(new Error('Old health failure'));});}
+        return {};
+      };
+    });
+    await page.locator('[data-view=video]').click();await page.locator('#hover').check();
+    await page.waitForFunction(()=>Boolean(harness.failOldSetup));
+    await page.locator('#hover').uncheck();await page.locator('#hover').check();
+    await page.waitForFunction(()=>harness.messages.some(m=>m.type==='qingread:hover-enable'&&m.enabled));
+    await page.evaluate(async()=>{harness.failOldSetup();await new Promise(resolve=>setTimeout(resolve,0));});
+    assert.equal(await page.locator('#hover').isChecked(),true);
+    assert.doesNotMatch(await page.locator('#video-status').textContent(),/Old health failure/);
+  }finally{await page.close();}
+});
+
+for(const kind of ['web','video'])test(`${kind} setup binds its source before injection completes`,async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      chrome.tabs.query=async()=>[{id:7,windowId:3,url:'https://article.test/'}];
+      chrome.scripting.executeScript=async()=>new Promise(resolve=>{harness.finishInjection=()=>resolve([{documentId:'doc-7'}]);});
+    });
+    if(kind==='video')await page.locator('[data-view=video]').click();
+    const start=kind==='web'?'#start':'#video-start';
+    await page.locator(start).click();await page.waitForFunction(()=>Boolean(harness.finishInjection));
+    await page.evaluate(()=>harness.onActivated({windowId:4,tabId:99}));
+    assert.equal(await page.locator(start).isDisabled(),true,'Another window cannot stop setup');
+    await page.evaluate(()=>harness.onUpdated(7,{url:'https://article.test/new'}));
+    assert.equal(await page.locator(start).isEnabled(),true,'Source navigation must stop pending injection');
+    await page.evaluate(()=>harness.finishInjection());
+    assert.equal(await page.evaluate(()=>harness.messages.some(m=>['qingread:collect','qingread:media-start'].includes(m.type))),false);
+  }finally{await page.close();}
+});
+
 test('panel creates engine from user click, targets exact document, applies terms and restores', async () => {
   const page = await panelFixture();
   try {
@@ -551,6 +636,29 @@ test('stop during model translation prevents delayed insertion; unrelated tab re
     assert.equal(messages.filter(m => m.type.endsWith('apply')).length, 0);
     assert.equal(await page.locator('#start').isEnabled(), true);
   } finally { await page.close(); }
+});
+
+for(const kind of ['web','video'])for(const event of ['url','removed'])test(`${kind} work stops on source ${event} and can restart`,async()=>{
+  const page=await panelFixture('pending');
+  try{
+    if(kind==='video')await page.evaluate(()=>{
+      chrome.tabs.sendMessage=async(_id,message)=>{
+        harness.messages.push(message);
+        return message.type==='qingread:media-read'?{text:'Keep the original file.',version:1,timelineVersion:1}:{ok:true,applied:true};
+      };
+    });
+    const start=kind==='web'?'#start':'#video-start',stop=kind==='web'?'#stop':'#video-stop';
+    if(kind==='video')await page.locator('[data-view=video]').click();
+    await page.locator(start).click();await page.waitForFunction(()=>harness.translations.length===1);
+    const emit=(id,event)=>page.evaluate(({id,event})=>event==='url'?harness.onUpdated(id,{url:'https://article.test/next'}):harness.onRemoved(id),{id,event});
+    await emit(99,event);assert.equal(await page.locator(stop).isEnabled(),true);
+    await emit(7,event);
+    assert.equal(await page.locator(start).isEnabled(),true);
+    await page.evaluate(()=>harness.release());
+    assert.equal(await page.evaluate(()=>harness.messages.filter(m=>['qingread:apply','qingread:media-show'].includes(m.type)).length),0);
+    await page.locator(start).click();await page.waitForFunction(()=>harness.translations.length===2);
+    await page.locator(stop).click();
+  }finally{await page.close();}
 });
 
 test('switching tabs cancels translation without applying to another tab', async () => {

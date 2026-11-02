@@ -95,6 +95,30 @@ const {spawn}=require('node:child_process');
     await panel.waitForFunction(()=>!document.querySelector('#text-start').disabled,null,{timeout:190000});
     assert.ok((await panel.locator('#text-output').inputValue()).trim().length>5);
     report.checks.push('text translation: actual local model output');
+    // Native same-document navigation: no Chrome events or scripting APIs are mocked.
+    for(const kind of ['web','video']){
+      await article.evaluate(kind=>{
+        document.body.innerHTML=kind==='web'
+          ?'<main><p>'+('Check this source carefully before applying the translated paragraphs. '.repeat(25))+'</p></main>'
+          :'<div id="movie_player"><video style="width:640px;height:360px"></video><div class="ytp-caption-window-container"><span class="ytp-caption-segment">'+('Keep the original subtitle visible while the local translation is being prepared. '.repeat(15))+'</span></div></div>';
+      },kind);
+      await click(`[data-view=${kind}]`);
+      const before=requests.length;
+      await click(kind==='web'?'#start':'#video-start');
+      const deadline=Date.now()+30000;
+      while(!requests.slice(before).some(item=>['reading','generating'].includes(item.stage))){
+        if(Date.now()>deadline)throw new Error(`${kind} did not reach active translation`);
+        await new Promise(resolve=>setTimeout(resolve,50));
+      }
+      await article.evaluate(kind=>history.pushState({},'',`/navigation-${kind}`),kind);
+      const status=kind==='web'?'#status':'#video-status';
+      await panel.waitForFunction(selector=>document.querySelector(selector).textContent.includes('來源頁面已變更'),status,{timeout:10000});
+      await panel.waitForFunction(selector=>document.querySelector(selector).textContent.includes('助手已確認'),status,{timeout:10000});
+      assert.ok(requests.slice(before).some(item=>item.method==='DELETE'));
+      assert.ok(requests.slice(before).some(item=>item.stage==='cancelled'));
+      await article.waitForFunction(()=>!document.querySelector('[data-qingread-media]'));
+      report.checks.push(`${kind}: native same-document navigation cancels real local translation`);
+    }
     assert.deepEqual(errors,[]);
     report.passed=true;
   }catch(error){
