@@ -251,6 +251,58 @@ test('extraction excludes hidden, form, editable and code content; inline text i
     assert.ok(result.items.length > 3);
   } finally { await page.close(); }
 });
+const moeaArticleUrl='https://www.moea.gov.tw/MNS/doit/industrytech/IndustryTech.aspx?menu_id=13545&it_id=563#top';
+test('MOEA page-wrapper form yields article prose without form controls or site chrome',async()=>{
+  const page=await fixture(moeaArticleUrl);
+  try{
+    await page.setContent(fs.readFileSync(path.join(__dirname,'fixtures/moea-article.html'),'utf8'));
+    const result=await page.evaluate(async()=>{
+      const summary=await message({type:'qingread:summary-source',job:'summary',scope:'page'});
+      const batch=await message({type:'qingread:collect',job:'translate',scope:'page'});
+      const item=batch.items.find(item=>item.text.startsWith('第一段'));
+      const applied=item?await message({type:'qingread:apply',job:'translate',id:item.id,text:'人工譯文'}):null;
+      const again=await message({type:'qingread:summary-source',job:'summary2',scope:'page'});
+      return {summary,batch,applied,again};
+    });
+    const expected=['科技文章','人工圖譜文章','這是人工文章摘要。','第一段說明圖譜如何連結資料。','第二段說明導入成本與維護需求。'];
+    assert.deepEqual(result.summary.items.map(item=>item.text),expected);
+    assert.deepEqual(result.batch.items.map(item=>item.text),expected);
+    assert.equal(result.applied.applied,true);
+    assert.deepEqual(result.again.items.map(item=>item.text),expected,'Summary reads originals after translation');
+  }finally{await page.close();}
+});
+
+test('MOEA form exception is scoped by host, article path and verified page structure',async()=>{
+  for(const variant of ['other-host','other-path','missing-state','missing-title','nested-form-container']){
+    const url=variant==='other-host'?'https://example.test/MNS/doit/industrytech/IndustryTech.aspx':variant==='other-path'?'https://www.moea.gov.tw/account':moeaArticleUrl;
+    const page=await fixture(url);
+    try{
+      await page.setContent(fs.readFileSync(path.join(__dirname,'fixtures/moea-article.html'),'utf8'));
+      await page.evaluate(variant=>{
+        if(variant==='missing-state')document.querySelector('[name=__VIEWSTATE]').remove();
+        if(variant==='missing-title')document.querySelector('#holderContent_lblTitle').remove();
+        if(variant==='nested-form-container'){const container=document.createElement('section');document.body.prepend(container);container.append(document.querySelector('form'));}
+      },variant);
+      const result=await page.evaluate(()=>message({type:'qingread:summary-source',job:'test',scope:'page'}));
+      assert.equal(result.items.length,0,variant);
+    }finally{await page.close();}
+  }
+});
+
+test('MOEA article eligibility is recomputed before applying a delayed translation',async()=>{
+  const page=await fixture(moeaArticleUrl);
+  try{
+    await page.setContent(fs.readFileSync(path.join(__dirname,'fixtures/moea-article.html'),'utf8'));
+    const result=await page.evaluate(async()=>{
+      const batch=await message({type:'qingread:collect',job:'old',scope:'page'});
+      const item=batch.items.find(item=>item.text.startsWith('第一段'));
+      document.querySelector('[name=__VIEWSTATE]').remove();
+      return {found:Boolean(item),applied:item?await message({type:'qingread:apply',job:'old',id:item.id,text:'舊譯文'}):null};
+    });
+    assert.equal(result.found,true);assert.equal(result.applied.applied,false);
+  }finally{await page.close();}
+});
+
 test('selected translation sends only the selected characters', async () => {
   const page = await fixture();
   try {

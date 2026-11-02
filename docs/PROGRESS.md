@@ -13,6 +13,30 @@
 
 六項清單已有實作，但使用者持續遇到錯誤，目前轉入穩定性修復，不以實作完成或測試數量代表產品可用性驗收完成。互動工作取消不等於 PDF 相容端點或 Whisper 的模型運算可立即停止，範圍與限制見各節。
 
+## 經濟部整頁表單正文誤排除（2026-11-02）
+
+回報頁：[經濟部科技新知文章](https://www.moea.gov.tw/MNS/doit/industrytech/IndustryTech.aspx?menu_id=13545&it_id=563#top)。使用者看到「沒有讀到正文。請先展開要閱讀的內容再試」。此訊息由 `summary.js` 在 `batch.items` 沒有可用文字時產生，尚未呼叫摘要模型。最初測試瀏覽器遭網站 403 阻擋，不能用它推論使用者也遭阻擋；取得使用者對瀏覽工具的網站存取授權後，已成功讀取實際頁面並確認原因。
+
+**根因與缺漏：**該頁 DOM 是 `body > form#form1`，表單包含 ASP.NET 的隱藏狀態欄位、頁首搜尋、`#divMain > #divBox > #divContent` 正文及頁尾。沒有 main／article 地標。舊 `content.js/EXCLUDE` 把 form 及所有後代一律排除，正文因此讀到 0 段。舊測試只驗證一般輸入表單必須排除，沒有覆蓋「公開文章被整頁表單包住」的版型；這是擷取規則與測試缺口，不是使用者沒有展開文章。
+
+**實作與取捨：**`pageFormArticle()` 僅接受 `www.moea.gov.tw`／`moea.gov.tw` 的 `/MNS/doit/industrytech/IndustryTech.aspx` 路徑（大小寫不拘），且必須同時有 `#divContent`、其外層 `form#form1` 直接位於 body、隱藏 `__VIEWSTATE` 欄位、文章標題 `#holderContent_lblTitle` 與摘要 `#holderContent_lblIntro`。符合時以 divContent 作為正文根節點；只有這個根節點內、屬於該外層 form 的文字可略過 form 排除。不靠單一 form ID、政府網域或可見字數就全面開放表單，也不放寬其他網站／經濟部其他功能頁。
+
+`excluded(element, context)` 把一般元素排除與 form 邊界分開：input、textarea、select、button、隱藏、可編輯區等仍一律排除；表單內另排除 label、fieldset、role=form／search 的群組。label 額外排除限於表單內，因既有課程 FAQ 會用 label 顯示問題。`readContext()` 每次擷取／分批／套用譯文都重新確認版型資格，避免網站內容變動後沿用過時例外。`readableRoot()` 同一輪檢查共用 context，保持長頁快取設計。
+
+**資料流：**整理摘要 → `summary.js` 注入並送 `qingread:summary-source` → `content.js/readingRoot()` 找到已驗證的文章區 → `allowed()`／`excluded()` 過濾表單元件與不可見內容 → 回傳原文段落 → summary 以空行串接、最多 6,000 字元 → `local-client.js` 驗證助手能力並建立本機摘要工作 → 顯示結果。網頁翻譯共用此擷取規則，套用譯文前仍以 `textOf()` 重新檢查可讀性；摘要讀取已翻譯頁時仍取原文，不重複收錄清讀譯文。
+
+**證據與限制：**實際公開頁確認文章為 Graph RAG 技術介紹，表單與正文容器結構如上。從已授權頁面只保存 `#divContent` DOM，移除 script、img，不保存隱藏表單值或瀏覽憑證；快照位於忽略 Git 的 `test-results/moea-article-snapshot.json`。同一份快照以舊程式擷取 0 段／0 字元，修正後 22 段／4,678 字元；summary 的段落間空行合計另加 42 字元，介面顯示 4,720 字元。
+
+`tests/stability-smoke.cjs --live-model --article-snapshot test-results/moea-article-snapshot.json` 在隔離 Chromium 載入真正外掛，將文章網址回應替換為已取得的 DOM 快照，依觀察到的層級重建 form，透過原生工具列 activeTab 授權、正式助手 HTTP 程式與既有 Gemma 3 4B 完成摘要；單次 39.831 秒、197 字元輸出。報告 `test-results/moea-stability-smoke.json`、畫面 `test-results/moea-summary.png`。此為真實模型與外掛搭配實際文章 DOM 重播，未重播網站 CSS／腳本、未在使用者日常 Chrome 側欄驗收，也未逐句驗證摘要品質。整合流程另確認快取、停止後重試、模擬斷線恢復、文字翻譯及換頁取消。
+
+提交的 `tests/fixtures/moea-article.html` 只保留已觀察的版型、人工文字與人工敏感欄位標記，不包含真實文章全文。三個新增測試覆蓋正文／原文重讀、範圍限制（其他 host、其他 path、缺少狀態／標題、form 不在 body 下）、版型改變後拒絕套用舊譯文。修正前兩例失敗，修正後通過。完整回歸曾發現 Skilljar FAQ 的 label 受影響，已修復，不能只跑新案例就當完成。
+
+最終驗證：43 項 JavaScript、110 項瀏覽器測試全數通過。本批助手未改動，未重跑 Python。另於本次收尾查詢正在執行的助手，`ollama`、`inference_jobs`、`inference_client_identity` 皆為 true；因此本次毋須再重啟助手或重新配對。此為本次觀測，不代表未來程序重啟後永遠維持相同狀態。
+
+**啟用與排錯：**重載清讀 → 重開側欄 → 重新整理該經濟部文章頁 → 再按整理摘要；本批沒有助手變更。若仍顯示空正文，先確認來源頁已刷新，避免仍使用已注入的舊 `content.js`；其次檢查網址是否為上述文章路徑、divContent 是否可見、form／標題／摘要標記是否仍存在。若頁面顯示網站阻擋而不是文章，先處理網站可讀性，不能靠放寬擷取解決。若改成助手相容性或配對錯誤，表示已通過擷取，依助手章節排查。不要為了這個錯誤刪設定、重抓模型或反覆授權網站。
+
+**自行修改例：**網站若將正文 ID 改名，需先查看實際 DOM，再一起改 `pageFormArticle()` 的 selector 與人工 fixture，重跑 `npm.cmd run test:browser`；不能只刪掉 form 檢查。要支援另一個整頁表單網站，新增明確驗證的文章容器規則及主機／路徑限制，並補普通表單不能洩出、欄位群組不能讀、版型失效拒絕舊結果與既有 FAQ 回歸。記錄資料流與例外範圍，避免讓表單例外默默擴大。
+
 ## 換頁取消與單字解釋重新啟用（2026-11-02）
 
 這批接續穩定性檢查，不新增功能。已在修改前用六個失敗案例重現：網頁／影片各自遇到只有 URL 更新或來源關閉時沒有停止；滑過單字關閉後未取消助手請求；讀詞回覆晚到後仍提交模型。另補三例保護準備期間的來源視窗、舊啟用失敗與新查詢互不干擾，完整瀏覽器測試由 98 增至 107 項。

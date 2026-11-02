@@ -9,6 +9,8 @@ const {spawn}=require('node:child_process');
   assert.ok(process.argv.includes('--live-model'),'Pass --live-model to use the installed model.');
   const root=path.resolve(__dirname,'..'),results=path.join(root,'test-results');
   fs.mkdirSync(results,{recursive:true});
+  const snapshotIndex=process.argv.indexOf('--article-snapshot');
+  const snapshot=snapshotIndex<0?null:JSON.parse(fs.readFileSync(process.argv[snapshotIndex+1],'utf8'));
   const temp=fs.mkdtempSync(path.join(results,'stability-')),extension=path.join(root,'extension');
   const helper=spawn(path.join(root,'companion/.venv/Scripts/python.exe'),[path.join(root,'tests/inference_fixture_server.py'),'--live-model'],{windowsHide:true,stdio:['ignore','pipe','ignore']});
   const report={scope:'real extension, native activeTab grant, real helper and local model; isolated pairing token; loopback HTTP forwarded to a random port',checks:[]};
@@ -47,7 +49,15 @@ const {spawn}=require('node:child_process');
     }
     const local=await context.newPage();await local.goto('http://127.0.0.1:8765/health');await grant(local);
     const article=await context.newPage();
-    await article.goto('https://aa.nttu.edu.tw/p/406-1002-179272,r1386.php?Lang=zh-tw',{waitUntil:'domcontentloaded',timeout:60000});
+    const articleUrl=snapshot?.url || 'https://aa.nttu.edu.tw/p/406-1002-179272,r1386.php?Lang=zh-tw';
+    if(snapshot){
+      assert.equal(new URL(articleUrl).hostname,'www.moea.gov.tw');
+      assert.equal(snapshot.structure.formId,'form1');assert.equal(snapshot.structure.formParent,'BODY');
+      // Replay the observed public article DOM without its scripts, assets or hidden state.
+      await article.route(new URL(articleUrl).origin+'/**',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"></head><body><form id="form1"><input type="hidden" name="__VIEWSTATE" value="synthetic"><div id="divMain"><div id="divBox">${snapshot.content}</div></div></form></body></html>`}));
+      report.articleSource='saved public MOEA article DOM; reconstructed observed form wrapper; no live site scripts or CSS';
+    }
+    await article.goto(articleUrl,{waitUntil:'domcontentloaded',timeout:60000});
     await grant(article);
     const click=selector=>panel.evaluate(selector=>document.querySelector(selector).click(),selector);
     await click('[data-view=summary]');await click('#summary-start');
@@ -64,7 +74,11 @@ const {spawn}=require('node:child_process');
       const text=await panel.locator('#summary-result').textContent();assert.ok(text.length>20);
       report.checks.push({label,seconds:(Date.now()-start)/1000,characters:text.length});
     }
-    await summarize('public NTTU article: complete summary');
+    await summarize(snapshot?'MOEA observed article DOM: complete summary':'public NTTU article: complete summary');
+    if(snapshot){
+      report.articleCoverage=await panel.locator('#summary-status').textContent();
+      await panel.screenshot({path:path.join(results,'moea-summary.png'),fullPage:true});
+    }
     // Public pages can change (e.g. late visitor counts), so cache assertions
     // must use a stable source rather than assuming the website never updates.
     await article.evaluate(()=>{document.body.innerHTML='<main><p>This synthetic article describes a local reading assistant. Keep the original text, review the translation, and stop processing when necessary.</p></main>';});
@@ -127,7 +141,7 @@ const {spawn}=require('node:child_process');
     throw error;
   }finally{
     report.requests=requests;report.pageErrors=errors;
-    fs.writeFileSync(path.join(results,'stability-smoke.json'),JSON.stringify(report,null,2));
+    fs.writeFileSync(path.join(results,snapshot?'moea-stability-smoke.json':'stability-smoke.json'),JSON.stringify(report,null,2));
     console.log(JSON.stringify({passed:report.passed,checks:report.checks,error:report.error}));
     // Explicitly cancel any test jobs before terminating our own helper.
     if(panel)await panel.evaluate(()=>document.querySelector('#summary-stop').click()).catch(()=>{});

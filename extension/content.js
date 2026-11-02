@@ -2,7 +2,8 @@
   if (globalThis.__qingReadInstalled) return;
   globalThis.__qingReadInstalled = true;
   const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,td,th,dd,dt,figcaption,div,article,section';
-  const EXCLUDE = 'script,style,noscript,template,pre,code,kbd,samp,textarea,input,select,button,form,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[hidden],[inert],[aria-hidden="true"],[data-qingread]';
+  const EXCLUDE = 'script,style,noscript,template,pre,code,kbd,samp,textarea,input,select,button,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[hidden],[inert],[aria-hidden="true"],[data-qingread]';
+  const FORM_UI = 'label,fieldset,[role="form"],[role="search"]';
   const PAGE_CHROME = 'header,[role="banner"],[role="menu"],[role="menubar"],nav,aside,[role="navigation"],[role="complementary"],footer';
   const WIKI_CHROME = '.infobox,.navbox,.sidebar,.metadata,.ambox,.reflist,.mw-references-wrap,.reference,.mw-editsection,.toc,.catlinks,.noprint';
   const isWikipedia = /(^|\.)wikipedia\.org$/.test(location.hostname);
@@ -12,7 +13,26 @@
   let layoutStyle = null;
   let collectionEpoch = 0, summaryEpoch = 0;
   const normalize = text => text.replace(/\s+/gu, ' ').trim();
-  const readContext = () => ({ancestors:new WeakMap(),excluded:new WeakMap(),clientRects:new WeakMap(),rects:new WeakMap()});
+  function pageFormArticle() {
+    // This public ASP.NET article template puts the entire page in one form.
+    // Allow only its verified reading region, never arbitrary form contents.
+    if (!['www.moea.gov.tw','moea.gov.tw'].includes(location.hostname) ||
+        !/^\/MNS\/doit\/industrytech\/IndustryTech\.aspx$/i.test(location.pathname)) return null;
+    const root=document.getElementById('divContent'), form=root?.closest('form');
+    if (!form || form.id!=='form1' || form.parentElement!==document.body ||
+        !form.querySelector('input[type="hidden"][name="__VIEWSTATE"]') ||
+        !root.querySelector('#holderContent_lblTitle') || !root.querySelector('#holderContent_lblIntro')) return null;
+    return {root,form};
+  }
+  const readContext = () => ({ancestors:new WeakMap(),excluded:new WeakMap(),clientRects:new WeakMap(),rects:new WeakMap(),article:pageFormArticle()});
+  function excluded(element, context) {
+    if (!context.excluded.has(element)) {
+      const form=element.closest('form');
+      const blockedForm=form && !(form===context.article?.form && context.article.root.contains(element));
+      context.excluded.set(element,Boolean(element.closest(EXCLUDE) || blockedForm || (form && element.closest(FORM_UI))));
+    }
+    return context.excluded.get(element);
+  }
   function rectOf(element, context) {
     if (!context.rects.has(element)) context.rects.set(element,element.getBoundingClientRect());
     return context.rects.get(element);
@@ -25,8 +45,7 @@
   function allowed(node, context = readContext()) {
     const element = node.parentElement;
     if (!element) return false;
-    if (!context.excluded.has(element)) context.excluded.set(element,Boolean(element.closest(EXCLUDE)));
-    if (context.excluded.get(element)) return false;
+    if (excluded(element,context)) return false;
     const trail = [];
     let visible = true;
     for (let parent = element; parent; parent = parent.parentElement) {
@@ -58,18 +77,21 @@
     layoutStyle?.remove(); layoutStyle = null;
   }
   function readableRoot(root) {
-    if (!root || root.closest(EXCLUDE + ',' + PAGE_CHROME)) return false;
+    const context=readContext();
+    if (!root || excluded(root,context) || root.closest(PAGE_CHROME)) return false;
     const rect = root.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return false;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     let node, visited = 0;
     while ((node = walker.nextNode()) && ++visited <= 25000) {
-      if (/\p{L}/u.test(node.textContent) && allowed(node) && !node.parentElement.closest(PAGE_CHROME)) return true;
+      if (/\p{L}/u.test(node.textContent) && allowed(node,context) && !node.parentElement.closest(PAGE_CHROME)) return true;
     }
     return false;
   }
   function readingRoot(scope) {
     if (scope === 'selection') return document.body;
+    const formArticle=pageFormArticle();
+    if (formArticle && readableRoot(formArticle.root)) return formArticle.root;
     const google = ['www.google.com','www.google.com.tw'].includes(location.hostname) && location.pathname === '/search' ? document.getElementById('rso') : null;
     const wiki = isWikipedia ? document.querySelector('#mw-content-text .mw-parser-output') : null;
     const course = /(^|\.)skilljar\.com$/.test(location.hostname) ? document.getElementById('skilljar-content') : null;
