@@ -40,6 +40,46 @@
     }
     return chunks;
   }
+  async function translateWebItem(item, translateChunk, format) {
+    async function translateProse(text) {
+      const outputs = [];
+      for (const chunk of splitText(text)) outputs.push(await translateChunk(chunk));
+      return format(outputs.join('\n'));
+    }
+    if (!item.parts) return translateProse(item.text);
+
+    // Keep sentence context when the engine can preserve placeholders.
+    const literals = [];
+    let prefix = 'ZXQRCODE';
+    while (item.text.includes(prefix)) prefix += 'X';
+    const masked = item.parts.map(part => typeof part === 'string' ? part :
+      prefix + (literals.push(part.literal) - 1) + 'QXZ').join('');
+    if (Array.from(masked).length <= LIMITS.chunk) {
+      const output = await translateChunk(masked);
+      const pattern = new RegExp(prefix + '(\\d+)QXZ', 'gu');
+      const markers = [...output.matchAll(pattern)];
+      const ids = markers.map(match => Number(match[1]));
+      const prose = output.replace(pattern, '');
+      if (ids.length === literals.length && new Set(ids).size === literals.length &&
+          ids.every(id => id < literals.length) && !prose.includes(prefix) && /\p{L}/u.test(prose)) {
+        let translated = '', cursor = 0;
+        for (const [index, marker] of markers.entries()) {
+          translated += format(output.slice(cursor, marker.index)) + literals[ids[index]];
+          cursor = marker.index + marker[0].length;
+        }
+        return translated + format(output.slice(cursor));
+      }
+    }
+
+    // If placeholders were rewritten, translate only the surrounding prose.
+    const output = [];
+    for (const part of item.parts) {
+      if (typeof part !== 'string') output.push(part.literal);
+      else if (!/\p{L}/u.test(part)) output.push(part);
+      else output.push(part.match(/^\s*/u)[0] + await translateProse(part.trim()) + part.match(/\s*$/u)[0]);
+    }
+    return output.join('');
+  }
   function injectionErrorName(error) {
     const message = String(error?.message || '');
     if (/extension context invalidated|could not load file|cannot load file/i.test(message)) return 'ExtensionLoadError';
@@ -66,6 +106,6 @@
       default: return '本次操作未完成。請查看下方失敗步驟，再決定如何重試。';
     }
   }
-  root.QingReadCore = Object.freeze({ LIMITS, LANGUAGES, TERMS, localize, splitText, errorText, injectionErrorName, parseGlossary, applyGlossary });
+  root.QingReadCore = Object.freeze({ LIMITS, LANGUAGES, TERMS, localize, splitText, translateWebItem, errorText, injectionErrorName, parseGlossary, applyGlossary });
   if (typeof module !== 'undefined') module.exports = root.QingReadCore;
 })(globalThis);

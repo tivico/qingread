@@ -53,9 +53,7 @@
       }
       if(message.action==='capture'){
         if(!validTarget(message.target))throw new Error('來源分頁不正確。');
-        const [tab]=await chrome.tabs.query({active:true,windowId:message.target.windowId});
-        if(tab?.id!==message.target.tabId)throw new Error('請回到原影片再收合字幕。');
-        return {streamId:await chrome.tabCapture.getMediaStreamId({targetTabId:tab.id})};
+        return captureTabAudio({...message.target,waitForRelease:true});
       }
       if(message.action==='idle'){
         setTimeout(()=>{void exclusive(async()=>{

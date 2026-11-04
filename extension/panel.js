@@ -7,6 +7,8 @@ let ready = false;
 let availabilityEpoch = 0;
 let glossaryRules = [];
 let siteAccessTarget = null;
+let displayRevision = 0;
+let displayTabId = null;
 const pendingSiteRequests = new Set();
 async function checkAvailability() {
   const epoch = ++availabilityEpoch, source = $('source').value;
@@ -107,7 +109,7 @@ function showFailure(error, job) {
     : '重新整理網頁後重試。';
   status(unknown ? `${label}失敗，尚無法確認原因。` : failure(error),
     `失敗步驟：${label}
-清讀 0.3.8 · ${$('engine').value} · ${$('source').value} → zh-Hant
+清讀 0.3.9 · ${$('engine').value} · ${$('source').value} → zh-Hant
 診斷：${pageError ? 'page-read' : stage} / ${name}
 ${hint}`);
   if (error.name === 'PageAccessError') { $('grant-site').textContent = siteAccessTarget?.origin ? '允許 '+new URL(siteAccessTarget.origin).hostname : '檢查網站存取'; $('grant-site').hidden = false; }
@@ -171,6 +173,13 @@ async function start() {
     const created = await waitForEngine(job.creation,job); assertLive(job);
     if(created.error)throw created.error;
     job.translator=created.translator;
+    const translateChunk = async chunk => {
+      const output = await waitForEngine(job.translator.translate(chunk, {signal:job.controller.signal}),job);
+      assertLive(job);
+      if (typeof output !== 'string' || !output.trim() || output.length > 20000) throw new Error('output');
+      return output.trim();
+    };
+    const format = text => QingReadCore.applyGlossary($('terms').checked ? localize(text) : text, job.glossary);
     let completed = 0, skipped = 0, failed = 0, characters = 0;
     $('progress').max = batch.items.length;
     const pending = [...batch.items];
@@ -188,16 +197,9 @@ async function start() {
       status(`正在翻譯第 ${completed + skipped + failed + 1}／${batch.items.length} 段…`, '文字由所選的本機引擎處理，請保持側邊欄開啟。');
       try {
         job.stage = 'engine-translate';
-        const outputs = [];
-        for (const chunk of splitText(item.text)) {
-          const output = await waitForEngine(job.translator.translate(chunk, { signal: job.controller.signal }),job);
-          assertLive(job);
-          if (typeof output !== 'string' || !output.trim() || output.length > 20000) throw new Error('output');
-          outputs.push(output.trim());
-        }
-        const translated = outputs.join('\n');
+        const translated = await QingReadCore.translateWebItem(item, translateChunk, format);
         job.stage = 'page-apply';
-        const response = await send(job.target, { type: 'qingread:apply', job: job.id, id: item.id, text: QingReadCore.applyGlossary($('terms').checked ? localize(translated) : translated, job.glossary) });
+        const response = await send(job.target, { type: 'qingread:apply', job: job.id, id: item.id, text: translated });
         assertLive(job);
         if (!response || response.error) throw new DOMException('Invalid apply response','PageReadError');
         if (response.applied) completed++; else skipped++;
@@ -240,17 +242,57 @@ $('test-engine').onclick = async () => {
   finally {job.controller.abort();job.translator?.destroy();if(!job.translator)void job.creation?.then(result=>result.translator?.destroy());if(running===job){running=null;controls(false);}}
 };
 $('stop').addEventListener('click', () => cancel('已停止翻譯。'));
+async function syncDisplayMode(expectedTabId) {
+  const revision = displayRevision;
+  const [tab] = await chrome.tabs.query({active:true,currentWindow:true}).catch(() => []);
+  if (revision !== displayRevision || (expectedTabId !== undefined && expectedTabId !== tab?.id)) return;
+  const current = ++displayRevision;
+  displayTabId = tab?.id;
+  const response = Number.isInteger(tab?.id) &&
+    await chrome.tabs.sendMessage(tab.id, {type:'qingread:display'}, {frameId:0}).catch(() => null);
+  if (current === displayRevision) {
+    $('translation-only').checked = response?.translationOnly === true;
+    $('translation-only').disabled = false;
+  }
+}
+$('translation-only').addEventListener('change', async () => {
+  const checkbox = $('translation-only'), only = checkbox.checked;
+  const revision = ++displayRevision;
+  checkbox.disabled = true;
+  try {
+    const tab = await activeTab();
+    displayTabId = tab.id;
+    const target = await inject(tab);
+    const current = await activeTab();
+    if (revision !== displayRevision || current.id !== target.tabId) return;
+    const result = await send(target, {type:'qingread:display',translationOnly:only});
+    if (result?.translationOnly !== only) throw new DOMException('Display mode not applied','PageReadError');
+  } catch (error) {
+    if (revision === displayRevision) {
+      checkbox.checked = !only;
+      if (!running) status(errorText(error), '可點工具列的清讀圖示取得目前網頁的存取權，再切換顯示方式。');
+    }
+  } finally {
+    if (revision === displayRevision) checkbox.disabled = false;
+  }
+});
 $('restore').addEventListener('click', async () => {
+  const revision = ++displayRevision;
+  $('translation-only').disabled = true;
   $('restore').disabled = true;
   try {
     const tab = await activeTab();
     const target = await inject(tab);
     const result = await send(target, { type: 'qingread:restore' });
     if (!result?.restored) throw new Error('restore');
+    if (revision === displayRevision) $('translation-only').checked = false;
     $('progress').value = 0;
     status('已還原目前網頁。', '原文保持不變，僅移除清讀插入的譯文。');
   } catch (error) { status(errorText(error)); }
-  finally { $('restore').disabled = Boolean(running); }
+  finally {
+    if (revision === displayRevision) $('translation-only').disabled = false;
+    $('restore').disabled = Boolean(running);
+  }
 });
 for (const id of ['source', 'scope', 'terms', 'engine']) {
   $(id).addEventListener('change', () => {
@@ -260,8 +302,10 @@ for (const id of ['source', 'scope', 'terms', 'engine']) {
 }
 // Pasted-text jobs never read a page, so another tab cannot invalidate them.
 chrome.tabs.onActivated.addListener(info => { if (Number.isInteger(running?.windowId ?? running?.target?.windowId) && info.windowId !== (running.windowId ?? running.target.windowId)) return; if (running && running.kind !== 'text') cancel('已切換分頁，翻譯已停止。'); });
+chrome.tabs.onActivated.addListener(info => { void syncDisplayMode(info.tabId); });
 chrome.tabs.onUpdated.addListener((id, change) => {
   if (running && (change.status === 'loading' || change.url) && id === running.tabId) cancel('來源頁面已變更，翻譯已停止。');
+  if (id === displayTabId && change.status === 'complete' && !$('translation-only').disabled) void syncDisplayMode(id);
 });
 chrome.tabs.onRemoved?.addListener(id => { if (running?.tabId === id) cancel('來源分頁已關閉，翻譯已停止。'); });
 window.addEventListener('pagehide', () => cancel('側邊欄已關閉。'));
@@ -269,6 +313,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') cancel('側邊欄已隱藏，翻譯已停止。');
 });
 (async () => {
+  void syncDisplayMode();
   try {
     await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     const preferences = await chrome.storage.local.get(['source', 'scope', 'terms', 'engine', 'glossary']);

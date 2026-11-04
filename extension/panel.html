@@ -18,7 +18,7 @@
   <script src="text.js" defer></script>
 </head>
 <body class="panel">
-  <header><img class="mascot" src="mascot.svg" alt="" width="64" height="64"><div><h1>清讀</h1><p>和小讀一起，看懂全世界。</p></div><span class="badge">v0.3.8</span></header>
+  <header><img class="mascot" src="mascot.svg" alt="" width="64" height="64"><div><h1>清讀</h1><p>和小讀一起，看懂全世界。</p></div><span class="badge">v0.3.9</span></header>
   <nav aria-label="功能"><button data-view="web" aria-pressed="true">網頁翻譯</button><button data-view="text" aria-pressed="false">文字翻譯</button><button data-view="video" aria-pressed="false">影片字幕</button><button data-view="summary" aria-pressed="false">網頁摘要</button><button data-view="settings" aria-pressed="false">設定</button></nav><main>
 
     <section class="card engine-card" aria-label="翻譯設定">
@@ -34,16 +34,18 @@
       <details><summary>課文沒有翻到？</summary><p class="hint">課文可能在另一個內嵌頁面。可找出來源，另開分頁翻譯；這不會自動授權或讀取其中內容。</p><button id="scan-frames">尋找內嵌課文</button><p id="frames-status" role="status" class="hint"></p><div id="frames-list"></div></details>
       <label for="scope">翻譯範圍</label>
       <select id="scope"><option value="page">文章正文（自動辨識）</option><option value="selection">只翻譯反白文字</option></select>
+      <label class="check"><input id="translation-only" type="checkbox" aria-describedby="translation-only-hint">只顯示中文譯文</label>
+      <p id="translation-only-hint" class="hint">立即切換目前網頁已完成的正文。反白翻譯及含表單或媒體的區塊會保留原文。</p>
       <button id="start" class="primary" disabled>準備中…</button>
       <div class="actions"><button id="stop" disabled>停止</button><button id="restore">還原目前網頁</button><button id="test-engine">測試引擎</button></div>
       <section class="status-card" aria-label="翻譯狀態">
         <p id="status" role="status" aria-live="polite">正在準備…</p>
         <progress id="progress" max="1" value="0" aria-label="翻譯進度"></progress>
         <button id="grant-site" hidden>允許此網站</button>
-        <p id="detail" class="hint">按開始後，中文會出現在網頁原文下方。</p>
+        <p id="detail" class="hint">按開始後，譯文會依選擇的方式顯示在網頁上。</p>
       </section>
     </section>
-    <section data-page="text" hidden class="card"><h2>貼上文字，輕鬆讀懂。</h2><div class="text-panes"><div><label for="text-input">原文</label><textarea id="text-input" rows="7" maxlength="6000" placeholder="在這裡輸入或貼上要翻譯的文字…" spellcheck="false"></textarea><p id="text-count" class="hint">0 / 6,000 字元</p></div><div><label for="text-output">繁體中文</label><textarea id="text-output" rows="7" readonly placeholder="譯文會顯示在這裡。" spellcheck="false"></textarea></div></div><button id="text-start" class="primary" disabled>翻譯文字</button><div class="actions"><button id="text-stop" disabled>停止</button><button id="text-retry" hidden>接續翻譯</button><button id="text-copy" disabled>複製譯文</button><button id="text-clear">清空</button></div><p id="text-status" class="hint" role="status">使用上方所選引擎與原文語言。按翻譯後才處理，不讀取目前網頁。</p><p class="hint">輸入與譯文不儲存為歷史紀錄；關閉側欄後可能遺失，請先複製需要的內容。</p></section>
+    <section data-page="text" hidden class="card"><h2>貼上文字，輕鬆讀懂。</h2><div class="text-panes"><div><label for="text-input">原文</label><textarea id="text-input" rows="7" maxlength="6000" placeholder="在這裡輸入或貼上要翻譯的文字…" spellcheck="false" aria-describedby="text-language-hint"></textarea><p id="text-count" class="hint">0 / 6,000 字元</p><p id="text-language-hint" class="hint"></p></div><div><label for="text-output">繁體中文</label><textarea id="text-output" rows="7" readonly placeholder="譯文會顯示在這裡。" spellcheck="false"></textarea></div></div><button id="text-start" class="primary" disabled>翻譯文字</button><div class="actions"><button id="text-stop" disabled>停止</button><button id="text-retry" hidden>接續翻譯</button><button id="text-copy" disabled>複製譯文</button><button id="text-clear">清空</button></div><p id="text-status" class="hint" role="status">使用上方所選引擎與原文語言。按翻譯後才處理，不讀取目前網頁。</p><p class="hint">輸入與譯文不儲存為歷史紀錄；關閉側欄後可能遺失，請先複製需要的內容。</p></section>
     <section data-page="summary" hidden class="card"><h2>讀完，抓住重點。</h2><p class="hint">使用已配對的本機助手整理繁中摘要；Chrome 語言包只負責翻譯。摘要不會送往雲端。先整理總覽與三個重點，產生中的文字會逐步顯示。</p><p class="hint">讀取目前頁面可見正文（含已展開 FAQ），最多前 6,000 字元，不含未開啟的課程或連結內容。擷取後可切換分頁，結果會保留來源標示；關閉側欄仍會停止未完成工作。</p><p id="summary-source" class="hint" hidden></p><button id="summary-start" class="primary">整理目前分頁摘要</button><div class="actions"><button id="summary-stop" disabled>停止摘要</button><button id="summary-copy" disabled>複製摘要</button></div><p id="summary-status" role="status" class="hint">請先在「PDF 與助手設定」完成配對。</p><div id="summary-site-entry" hidden><label for="summary-site-url">Chrome 隱藏了目前網址。貼上這個網頁的網址，只授權這個網站：</label><input id="summary-site-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://目前網站/…"><p class="hint">網址只用來確認網站存取權，不會送給模型或保存。也可直接點 Chrome 工具列的清讀圖示後再試。</p></div><button id="summary-grant" hidden>允許此網站</button><section id="summary-output" hidden aria-labelledby="summary-output-title" aria-live="polite"><h3 id="summary-output-title">摘要結果</h3><div id="summary-result"></div></section></section>
     <section data-page="video" hidden class="card">
       <h2>影片翻譯字幕</h2>
@@ -51,11 +53,12 @@
       <select id="video-mode"><option value="captions">讀取影片現有字幕</option><option value="speech">聆聽分頁音訊 · 本機辨識</option></select>
       <label class="check"><input id="video-bilingual" type="checkbox" checked>同時顯示原文</label>
       <p class="hint">舒適閱讀：原文與繁中一起整段更新，保留至少約 2 秒閱讀時間。預設雙語對照；只想看繁中時可在開始前取消勾選原文。換句太快時會略過過期譯文，避免字幕越積越慢。</p>
-      <p class="hint">YouTube 請保持原字幕開啟。譯文出現時會暫時隱藏原字幕，停止後恢復；暫停影片可保留譯文慢慢讀。翻譯較原字幕稍有延遲。</p>
-      <p class="hint">語音模式需本機助手與語音模型，會擷取此分頁所有聲音。每 4 秒處理一段，保留 0.5 秒邊界重疊；最多等候最新一段，跟不上時略過舊片段。側欄會顯示辨識與翻譯耗時，通常有數秒以上延遲。</p>
+      <p class="hint">字幕來源二選一；上方原文語言請選影片使用的語言。選「讀取影片現有字幕」時，YouTube 請保持原文字幕開啟。譯文出現時會暫時隱藏原字幕，停止後恢復；暫停影片可保留譯文慢慢讀。翻譯較原字幕稍有延遲。</p>
+      <p class="hint">選「聆聽分頁音訊」需先在助手設定完成配對並下載語音模型。回到影片分頁，點 Chrome 工具列的清讀圖示，再開始並允許音訊權限。「同時顯示原文」會顯示辨識文字。此模式擷取分頁所有聲音，每 4 秒處理一段，保留 0.5 秒邊界重疊；最多等候最新一段，跟不上時略過舊片段。側欄會顯示辨識與翻譯耗時，通常有數秒以上延遲。</p>
       <div class="actions"><button id="video-start">開始字幕</button><button id="video-stop" disabled>停止字幕</button></div><button id="video-collapse" disabled>收合側欄，繼續字幕</button><p id="video-background-status" class="hint" role="status"></p><p class="hint">開始後可按上方收合，字幕會在背景繼續；影片右上角可停止。直接關閉尚未交接的側欄仍會停止。</p>
       <button id="video-access" hidden>處理此網站的存取權</button>
       <p id="video-status" class="hint" role="status">先開啟影片，再開始。字幕與整頁翻譯請分開使用。</p>
+      <details><summary>查看字幕耗時</summary><p id="video-timing" class="hint">完成一筆字幕後會顯示耗時。本機模型會另外提供排隊、載入、讀文與生成時間。</p></details>
       <label class="check"><input id="hover" type="checkbox">啟用滑過單字解釋（按住 Alt）</label>
       <p class="hint">需本機助手；按住 Alt 滑過英文單字，停留片刻即可查看詞義與例句。</p>
     </section>

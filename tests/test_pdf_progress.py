@@ -1,4 +1,5 @@
 import asyncio,io,json,sys,tempfile,threading,unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'companion'))
@@ -36,6 +37,61 @@ class PdfProgressTest(unittest.TestCase):
     def test_text_on_later_pages_does_not_hide_image_only_preview(self):
         with self.assertRaises(UserError) as error:self.app.start_pdf(self.pdf(text=False),'en',preview=True)
         self.assertEqual(error.exception.code,'PDF_SCAN')
+    def test_pdf_start_failures_remove_the_unstarted_job_and_allow_retry(self):
+        raw = self.pdf()
+        original_bytes = Path.write_bytes
+        original_text = Path.write_text
+
+        def write_bytes(path, *args, **kwargs):
+            if path.name == 'input.pdf':
+                original_bytes(path, b'partial')
+                raise OSError('simulated input write failure')
+            return original_bytes(path, *args, **kwargs)
+
+        def fail_text_at(filename):
+            def write_text(path, *args, **kwargs):
+                if path.name == filename:
+                    original_text(path, 'partial')
+                    raise OSError('simulated metadata write failure')
+                return original_text(path, *args, **kwargs)
+            return write_text
+
+        failures = [
+            patch.object(Path, 'write_bytes', write_bytes),
+            patch.object(Path, 'write_text', fail_text_at('options.json')),
+            patch.object(Path, 'write_text', fail_text_at('job.json.tmp')),
+            patch('app.threading.Thread.start', side_effect=RuntimeError('simulated thread start failure')),
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure.attribute), failure:
+                with self.assertRaises(UserError) as error:
+                    self.app.start_pdf(raw, 'en')
+                self.assertEqual(error.exception.code, 'JOB_START')
+                self.assertEqual(self.app.jobs, {})
+                self.assertEqual(list(self.app.jobs_root.iterdir()), [])
+        with patch('app.threading.Thread'):
+            job = self.app.start_pdf(raw, 'en')
+        self.assertEqual(job['state'], 'queued')
+        self.assertTrue((self.app.jobs_root / job['id'] / 'input.pdf').exists())
+
+    def test_simultaneous_pdf_submissions_reserve_only_one_job(self):
+        raw = self.pdf()
+        ready = threading.Barrier(2)
+        started = threading.Event()
+
+        def submit():
+            ready.wait(timeout=5)
+            try:
+                return self.app.start_pdf(raw, 'en')['state']
+            except UserError as error:
+                return error.code
+
+        with patch.object(self.app, 'run_pdf', side_effect=lambda *_: started.set()) as worker, ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _index: submit(), range(2)))
+            self.assertCountEqual(results, ['queued', 'JOB_BUSY'])
+            self.assertTrue(started.wait(5))
+        self.assertEqual(len(self.app.jobs), 1)
+        worker.assert_called_once()
     def test_coarse_progress_never_contains_raw_stage_text_and_tracks_finish(self):
         directory=Path(self.temp.name)
         async def events():

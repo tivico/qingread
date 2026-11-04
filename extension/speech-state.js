@@ -1,5 +1,5 @@
 (function(root){
-  const POLICY=Object.freeze({windowMs:4500,strideMs:4000,overlapMs:500,maxQueueAgeMs:6000,maxResultAgeMs:15000});
+  const POLICY=Object.freeze({windowMs:4500,strideMs:4000,overlapMs:500,maxQueueAgeMs:6000,maxResultAgeMs:15000,busyRetryMs:500,busyTimeoutMs:10000});
   function createLatestBuffer(){
     let pending=null,dropped=0;
     return {

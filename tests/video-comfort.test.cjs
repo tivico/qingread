@@ -87,6 +87,33 @@ test('comfort captions keep one box across word growth, short gaps, and a delaye
     assert.equal(stopped.sourceOpacity, '1');
   } finally { await page.close(); }
 });
+test('background handoff preserves visible captions and rejects the previous owner without resetting the timeline',async()=>{
+ const page=await mediaPage({bilingual:true});
+ try{
+  const result=await page.evaluate(async()=>{
+   await showCue('First caption.','已經顯示的中文字幕。');
+   const first=document.querySelector('[data-qingread-media]');
+   const before=await message({type:'qingread:media-read',session:'test'});
+   const background=msg=>new Promise(resolve=>listener(msg,{id:'test',url:'chrome-extension://test/background.js'},resolve));
+   const accepted=await background({type:'qingread:media-start',session:'next',handoff:'test',mode:'captions',bilingual:true,background:true});
+   const after=await background({type:'qingread:media-read',session:'next'});
+   const bad=await background({type:'qingread:media-start',session:'bad',handoff:'test',mode:'captions',bilingual:true,background:true});
+   listener({type:'qingread:media-stop',session:'test'},{id:'test',url:'chrome-extension://test/panel.html'},()=>{});
+   const kept=first.isConnected && first===document.querySelector('[data-qingread-media]');
+   const rollback=await background({type:'qingread:media-start',session:'test',handoff:'next',mode:'captions',bilingual:true,background:false});
+   return {accepted,before,after,bad,kept,rollback,text:displayState().text,
+    controlRemoved:!document.querySelector('[data-qingread-background]')};
+  });
+  assert.equal(result.accepted.ok,true);
+  assert.equal(result.after.timelineVersion,result.before.timelineVersion);
+  assert.equal(result.after.version,result.before.version);
+  assert.equal(result.bad.ok,false);
+  assert.equal(result.kept,true);
+  assert.equal(result.rollback.ok,true);
+  assert.equal(result.controlRemoved,true);
+  assert.equal(result.text,'已經顯示的中文字幕。');
+ }finally{await page.close();}
+});
 
 test('latest pending translation replaces intermediate results after minimum reading time', async () => {
   const page = await mediaPage();
@@ -188,6 +215,111 @@ test('rolling-line tolerance rejects expired overlap and short coincidental word
     const unrelated = await page.evaluate(snapshot => message({ ...snapshot, type:'qingread:media-show', session:'test', original:snapshot.text, text:'兩個共通字不代表同一句' }), short);
     assert.equal(unrelated.applied, false);
   } finally { await page.close(); }
+});
+test('recent completed captions tolerate bounded delay while seeks and newer results remain protected', async () => {
+ const page=await mediaPage({bilingual:true});
+ try{
+  const first=await page.evaluate(()=>setCue('First complete sentence.'));
+  await page.clock.runFor(1000);
+  await page.evaluate(()=>setCue('Second complete sentence.'));
+  await page.clock.runFor(900);
+  const result=await page.evaluate(snapshot=>message({...snapshot,type:'qingread:media-show',session:'test',
+   original:snapshot.text,text:'第一句已翻譯。',allowRecent:true}),first);
+  assert.equal(result.applied,true);
+  assert.equal(await page.evaluate(()=>shadows.get(document.querySelector('[data-qingread-media]')).querySelector('.delay').hidden),false);
+  await page.clock.runFor(2700);
+  assert.equal((await page.evaluate(()=>displayState())).exists,false);
+  const previous=await page.evaluate(()=>setCue('Third complete sentence.'));
+  await page.clock.runFor(500);
+  const current=await page.evaluate(()=>setCue('Fourth complete sentence.'));
+  await page.evaluate(snapshot=>message({...snapshot,type:'qingread:media-show',session:'test',
+   original:snapshot.text,text:'第四句已翻譯。',allowRecent:true}),current);
+  const old=await page.evaluate(snapshot=>message({...snapshot,type:'qingread:media-show',session:'test',
+   original:snapshot.text,text:'不可倒退到第三句。',allowRecent:true}),previous);
+  assert.equal(old.applied,false);
+  await page.evaluate(()=>document.querySelector('video').dispatchEvent(new Event('seeking')));
+  const seeked=await page.evaluate(snapshot=>message({...snapshot,type:'qingread:media-show',session:'test',
+   original:snapshot.text,text:'快轉前的舊結果。',allowRecent:true}),current);
+  assert.equal(seeked.applied,false);
+ }finally{await page.close();}
+});
+
+test('one-second caption changes remain readable with a 1.9 second translator',async()=>{
+ const reports=[];
+ for(const allowRecent of [false,true]){
+  const page=await mediaPage();
+  try{
+   await page.addScriptTag({path:path.join(extension,'caption-state.js')});
+   await page.evaluate(allowRecent=>{
+    const buffer=QingReadCaptions.createCueBuffer();let busy=false;
+    globalThis.rapidReport={accepted:0,rejected:0,shown:0};
+    for(let index=0;index<10;index++)setTimeout(()=>void setCue('A different topic number '+index+'.'),index*1000);
+    setInterval(async()=>{
+     const state=await message({type:'qingread:media-read',session:'test'});
+     buffer.observe(state,performance.now());
+     if(busy)return;
+     const candidate=buffer.take(performance.now());if(!candidate)return;
+     busy=true;
+     setTimeout(async()=>{
+      const response=await message({...candidate,type:'qingread:media-show',session:'test',
+       original:candidate.text,text:'人工譯文 '+candidate.version,allowRecent});
+      rapidReport[response.applied?'accepted':'rejected']++;busy=false;
+     },1900);
+    },250);
+    let previous=null;
+    setInterval(()=>{const state=displayState();if(state.exists&&state.text!==previous){rapidReport.shown++;previous=state.text;}},100);
+   },allowRecent);
+   await page.clock.runFor(6500);
+   reports.push({allowRecent,...await page.evaluate(()=>rapidReport)});
+  }finally{await page.close();}
+ }
+ assert.equal(reports[0].accepted,0);
+ assert.ok(reports[1].shown>=2,JSON.stringify(reports));
+ assert.ok(reports[1].rejected<reports[0].rejected,JSON.stringify(reports));
+ fs.writeFileSync(path.resolve(__dirname,'../test-results/rapid-caption-latency.json'),JSON.stringify(reports,null,2));
+});
+test('adaptive scheduling lowers the first subtitle delay on the same rolling trace',async()=>{
+ const timing=require('./fixtures/youtube-fast-caption-timing.json');
+ const reports=[];
+ for(const adaptive of [false,true]){
+  const page=await mediaPage();
+  try{
+   for(const file of ['core.js','caption-state.js','speech-state.js','video-pipeline.js'])
+    await page.addScriptTag({path:path.join(extension,file)});
+   await page.evaluate(({events,adaptive})=>{
+    const start=performance.now();
+    globalThis.schedulingReport={adaptive,firstSent:null,firstShown:null,shown:0,maxConcurrent:0,timings:[]};
+    let concurrent=0,previous=null,lastTiming=null;
+    const session={id:'test',target:{},mode:'captions',controller:new AbortController(),
+     cues:QingReadCaptions.createCueBuffer({adaptive}),cache:new Map(),cacheEnabled:false,glossary:[],terms:false,skipped:0,
+     translator:{translate:()=>new Promise(resolve=>{
+      if(schedulingReport.firstSent===null)schedulingReport.firstSent=performance.now()-start;
+      concurrent++;schedulingReport.maxConcurrent=Math.max(schedulingReport.maxConcurrent,concurrent);
+      setTimeout(()=>{concurrent--;resolve('人工譯文 '+performance.now());},1900);
+     })}};
+    const pipeline=QingReadVideoPipeline.create({getSession:()=>session,
+     stop:message=>{throw new Error(message);},send:(_target,msg)=>message(msg),waitForEngine:async promise=>promise,
+     say:(_text,timing)=>{if(timing&&timing!==lastTiming){schedulingReport.timings.push(timing);lastTiming=timing;}}});
+    for(const event of events)setTimeout(()=>void setCue(event.text),event.ms);
+    setInterval(()=>void pipeline.captions(session),250);
+    setInterval(()=>{
+     const state=displayState();
+     if(state.exists&&state.text!==previous){
+      schedulingReport.shown++;
+      if(schedulingReport.firstShown===null)schedulingReport.firstShown=performance.now()-start;
+      previous=state.text;
+     }
+    },100);
+   },{events:timing.events,adaptive});
+   await page.clock.runFor(timing.events.at(-1).ms+4500);
+   reports.push(await page.evaluate(()=>schedulingReport));
+  }finally{await page.close();}
+ }
+ assert.ok(reports[1].firstSent<reports[0].firstSent,JSON.stringify(reports));
+ assert.ok(reports[1].firstShown<reports[0].firstShown,JSON.stringify(reports));
+ assert.equal(reports[1].maxConcurrent,1);
+ assert.ok(reports[1].shown>=reports[0].shown,JSON.stringify(reports));
+ fs.writeFileSync(path.resolve(__dirname,'../test-results/adaptive-caption-benchmark.json'),JSON.stringify(reports,null,2));
 });
 
 test('media-read reports actual overlay visibility separately from accepted pending text', async () => {

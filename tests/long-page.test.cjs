@@ -50,16 +50,40 @@ test('new extraction and apply recheck changed ancestor styles and dynamic conte
     assert.equal(next.items[0].text,'New visible content after mutation.');
   }finally{await page.close();}
 });
-test('cancel or page mutation during a collection prevents partial mixed snapshots',async()=>{
+test('cancel or ongoing source mutations prevent partial mixed snapshots',async()=>{
   for(const mode of ['cancel','mutation']){
     const page=await pageForLongContent();
     try{
       const result=await page.evaluate(async mode=>{
         const pending=message({type:'qingread:collect',job:'changing',scope:'page'});
-        setTimeout(()=>{if(mode==='cancel')void message({type:'qingread:cancel',job:'changing'});else document.querySelector('#root').style.visibility='hidden';},0);
-        return pending;
+        const timer=mode==='cancel'
+          ? setTimeout(()=>void message({type:'qingread:cancel',job:'changing'}),0)
+          : setInterval(()=>{document.querySelector('#p0 span').firstChild.appendData(' updated');},0);
+        try { return await pending; } finally { clearInterval(timer); }
       },mode);
       assert.equal(result.error,'changed');assert.equal(result.items,undefined);
     }finally{await page.close();}
   }
+});
+test('long extraction ignores unrelated mutations and retries one real source change',async()=>{
+  const page=await pageForLongContent();
+  try{
+    const result=await page.evaluate(async()=>{
+      const aside=document.body.appendChild(document.createElement('aside'));
+      const root=document.querySelector('#root');
+      const collect=job=>message({type:'qingread:summary-source',job,scope:'page'});
+      let noise=0;
+      const timer=setInterval(()=>{aside.dataset.tick=++noise;},0);
+      try {
+        const unaffected=await collect('aside');
+        const pending=collect('actual');
+        setTimeout(()=>{root.querySelector('#p0 span').textContent='Fresh article text. ';},0);
+        const retried=await pending;
+        return {unaffected,retried,noise};
+      } finally { clearInterval(timer); }
+    });
+    assert.ok(result.noise>0);
+    assert.match(result.unaffected.items[0].text,/Sentence 0 word 0/);
+    assert.match(result.retried.items[0].text,/^Fresh article text/);
+  }finally{await page.close();}
 });

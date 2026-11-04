@@ -25,15 +25,32 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
   const local=await context.newPage();await local.goto(`http://127.0.0.1:${port}/health`);await grant(local);
   const article=await context.newPage();await article.route('https://video.test/**',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><style>body{margin:0;background:#222}#movie_player{width:900px;height:600px;background:#27453f}video{width:100%;height:90%}#movie_player:fullscreen{width:100vw;height:100vh}</style><div id="movie_player"><video></video><div class="ytp-caption-window-container"><span class="ytp-caption-segment">Keep the original file and check the translation.</span></div><button id="fullscreen">Full screen</button></div><script>document.querySelector("#fullscreen").onclick=()=>document.querySelector("#movie_player").requestFullscreen()</script>'}));
   await article.goto('https://video.test/watch');await grant(article);
+  await article.evaluate(async()=>{
+   const canvas=document.createElement('canvas');canvas.width=900;canvas.height=540;
+   const drawing=canvas.getContext('2d');drawing.fillStyle='#27453f';drawing.fillRect(0,0,900,540);
+   const video=document.querySelector('video');video.muted=true;video.srcObject=canvas.captureStream(2);
+   setInterval(()=>drawing.fillRect(0,0,900,540),500);
+   await video.play();
+  });
   // Observe shadow DOM text without changing the product's closed-shadow behavior.
   const tabId=await panel.evaluate(async()=>(await activeTab()).id);
   await worker.evaluate(tabId=>chrome.scripting.executeScript({target:{tabId},func:()=>{const original=Element.prototype.attachShadow;globalThis.shadows=new Map();Element.prototype.attachShadow=function(options){const result=original.call(this,options);shadows.set(this,result);return result;};}}),tabId);
   await panel.evaluate(()=>{chrome.storage.session.set({companionToken:'a'.repeat(43)});document.querySelector('#engine').value='local';document.querySelector('#engine').dispatchEvent(new Event('change'));document.querySelector('[data-view=video]').click();document.querySelector('#video-start').click();});
   await panel.waitForFunction(()=>!document.querySelector('#video-collapse').disabled);
+  await article.waitForFunction(()=>Boolean(document.querySelector('[data-qingread-media]')),null,{timeout:120000});
+  await article.evaluate(()=>{
+   globalThis.handoffBox=document.querySelector('[data-qingread-media]');
+   globalThis.handoffRemoved=false;
+   new MutationObserver(changes=>{
+    if(changes.some(change=>[...change.removedNodes].some(node=>node===handoffBox||node.contains(handoffBox))))handoffRemoved=true;
+   }).observe(document.documentElement,{subtree:true,childList:true});
+  });
   await panel.evaluate(()=>document.querySelector('#video-collapse').click());
   await article.waitForFunction(()=>Boolean(document.querySelector('[data-qingread-background]')),null,{timeout:20000});
   await panel.waitForFunction(()=>document.querySelector('#video-background-status').textContent.includes('背景已接手'));
   const state=await panel.evaluate(()=>chrome.runtime.sendMessage({type:'qingread:video-control',action:'status'}));assert.equal(state.active,true);
+  assert.equal(await article.evaluate(()=>handoffBox.isConnected&&!handoffRemoved),true);
+  report.checks.push('handoff preserves the visible subtitle box until the background adopts the source');
   await panel.close();panel=null;
   await article.locator('#fullscreen').click();
   await article.waitForFunction(()=>document.fullscreenElement?.id==='movie_player');
@@ -49,6 +66,9 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
   // Reopen controls in an inactive tab, so the source stays the active video.
   const opened=context.waitForEvent('page');await worker.evaluate(url=>chrome.tabs.create({url,active:false}),`chrome-extension://${id}/panel.html`);panel=await opened;await panel.waitForLoadState();
   await panel.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('背景字幕執行中'));
+  await panel.waitForFunction(()=>document.querySelector('#video-timing').textContent.includes('翻譯往返'));
+  if(report.liveModel)assert.match(await panel.locator('#video-timing').textContent(),/模型載入.*模型讀文.*生成譯文/);
+  report.checks.push('reopened controls receive subtitle timing metrics from the background owner');
   assert.equal(await panel.locator('#video-stop').isDisabled(),false);report.checks.push('reopened panel recovers background status and stop control');
   await worker.evaluate(tabId=>chrome.scripting.executeScript({target:{tabId},func:()=>globalThis.shadows.get(document.querySelector('[data-qingread-background]')).querySelector('button').click()}),tabId);
   await article.waitForFunction(()=>!document.querySelector('[data-qingread-background]')&&!document.querySelector('[data-qingread-media]'));

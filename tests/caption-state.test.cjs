@@ -90,3 +90,14 @@ test('fast YouTube rolling trace cannot keep resetting the first translation', (
   assert.ok(sent.length >= 6 && sent.length <= 9, 'Batch rolling updates without a request for each word');
   for (let i = 1; i < sent.length; i++) assert.ok(sent[i] - sent[i-1] <= 2500);
 });
+test('adaptive captions submit complete short sentences early and bound a slow rolling stream', () => {
+  const buffer=createCueBuffer({adaptive:true});
+  buffer.observe(cue('Keep this file.',1),0);
+  assert.equal(buffer.take(249),null);
+  assert.equal(buffer.take(250).waitMs,250);
+  for(let index=0;index<=5;index++)buffer.observe(cue('word '.repeat(index+10),index+2),300+index*200);
+  assert.equal(buffer.take(1300,1900).waitMs,1000);
+  buffer.observe(cue('An unrelated new sentence.',8,2),1400);
+  assert.equal(buffer.take(1649,1900),null);
+  assert.equal(buffer.take(1650,1900).timelineVersion,2);
+});

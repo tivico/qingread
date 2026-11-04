@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { LIMITS, splitText, localize, errorText } = require('../extension/core.js');
-const { parseGlossary, applyGlossary } = require('../extension/core.js');
+const { parseGlossary, applyGlossary, translateWebItem } = require('../extension/core.js');
 test('glossary uses longest literal match without chained replacements or regex execution',()=>{
   const rules=parseGlossary('內存 => 記憶體\n內存池 => 記憶體池\na.b => $&\n記憶體 => RAM');
   assert.equal(applyGlossary('內存池 內存 a.b axb 記憶體',rules),'記憶體池 記憶體 $& axb RAM');
@@ -56,4 +56,31 @@ test('toolbar opens panel directly using action gesture without automatically to
 test('injection diagnostics classify known browser errors without exposing raw messages',()=>{
  const classify=require('../extension/core.js').injectionErrorName;
  for(const [message,expected] of [['Cannot access contents of url "https://learn.nvidia.com/private"','PageAccessError'],['No tab with id: 7','PageChangedError'],['Could not load file: content.js','ExtensionLoadError'],['secret article','PageInjectionError']])assert.equal(classify(new Error(message)),expected);
+});
+test('web translation restores exact inline literals before the text is shown', async () => {
+  const item = {text:'Set message.content to true.', parts:['Set ', {literal:'message.content'}, ' to ', {literal:'true'}, '.']};
+  const sent = [];
+  const format = text => applyGlossary(text, [['message.content', '不得取代'], ['設成', '設定為']]);
+  const result = await translateWebItem(item, async text => {
+    sent.push(text);
+    const [field, value] = text.match(/ZXQRCODE\d+QXZ/gu);
+    return `將 ${field} 設成 ${value}。`;
+  }, format);
+  assert.equal(result, '將 message.content 設定為 true。');
+  assert.equal(sent.length, 1);
+  assert.doesNotMatch(sent[0], /message\.content|true/u);
+});
+
+test('web translation falls back to prose when the engine drops or repeats a placeholder', async () => {
+  const item = {text:'Use /api/show for details.', parts:['Use ', {literal:'/api/show'}, ' for details.']};
+  for (const reply of ['遺漏標記。', 'ZXQRCODE0QXZ ZXQRCODE0QXZ', 'ZXQRCODE0QXZ']) {
+    const sent = [];
+    const result = await translateWebItem(item, async text => {
+      sent.push(text);
+      if (sent.length === 1) return reply;
+      return text === 'Use' ? '使用' : '取得詳細資訊。';
+    }, text => text);
+    assert.equal(result, '使用 /api/show 取得詳細資訊。');
+    assert.deepEqual(sent.slice(1), ['Use', 'for details.']);
+  }
 });

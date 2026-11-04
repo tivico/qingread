@@ -28,6 +28,13 @@ function managedClient(fetch) {
     : fetch(url, options));
 }
 
+test('cleanup reports no completed helper job when no managed work was created',()=>{
+ const local=client(()=>{throw new Error('No request expected');});
+ assert.equal(local.cancellationText([]),'');
+ assert.match(local.cancellationText([{status:'fulfilled'}]),/已確認/);
+ assert.match(local.cancellationText([{status:'rejected',reason:{cancelState:'unconfirmed'}}]),/尚未確認/);
+});
+
 test('an old running companion is rejected before any model job is submitted', async () => {
   for (const health of [{version:'0.3.8',inference_jobs:true}, {inference_jobs:true,inference_client_identity:false}, null]) {
     const calls=[];
@@ -39,6 +46,30 @@ test('an old running companion is rejected before any model job is submitted', a
       error=>error.code==='COMPANION_UPDATE_REQUIRED' && /重新啟動.*companion\/start.cmd/.test(error.message));
     assert.deepEqual(calls.map(call=>call.method),['GET']);
     assert.ok(calls[0].url.endsWith('/health'));
+  }
+});
+test('video inference requires the companion capability and preserves text plus timing metadata', async () => {
+  for (const supported of [false, true]) {
+    const bodies=[];
+    const local=client(async(url,options)=>{
+      if(url.endsWith('/health'))return new Response(JSON.stringify({
+        inference_jobs:true,inference_client_identity:true,video_inference:supported
+      }));
+      if(options.method==='POST')bodies.push(JSON.parse(options.body));
+      return new Response(JSON.stringify({stage:'done',text:'字幕譯文',timings:{queueMs:10,loadMs:20,generationMs:800}}));
+    });
+    const translator=local.translator('en',{profile:'video'});
+    if(!supported){
+      await assert.rejects(translator.translate('Keep this file.'),error=>error.code==='COMPANION_UPDATE_REQUIRED');
+      assert.equal(bodies.length,0);
+    }else{
+      assert.equal(await translator.translate('Keep this file.'),'字幕譯文');
+      assert.equal(bodies[0].profile,'video');
+      assert.equal(translator.lastMetrics.queueMs,10);
+      assert.equal(translator.lastMetrics.generationMs,800);
+      assert.equal(translator.lastMetrics.cached,false);
+    }
+    await translator.destroy();
   }
 });
 

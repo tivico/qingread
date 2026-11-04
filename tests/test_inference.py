@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'companion'))
-from app import Companion, make_server
+from app import Companion, make_server, UserError
 from inference import InferenceJobs, InferenceError, ModelStream, TIMEOUT_SECONDS
 
 
@@ -52,10 +52,47 @@ class InferenceTest(unittest.TestCase):
         self.app.inference_jobs.close()
         self.directory.cleanup()
 
-    def run_text(self, text='source', source='en', kind='translate'):
+    def run_text(self, text='source', source='en', kind='translate', profile=None):
         identifier = uuid.uuid4().hex
-        self.app.start_inference(identifier, 'local', {'kind':kind,'text':text,'source':source})
+        self.app.start_inference(identifier, 'local', {'kind':kind,'text':text,'source':source,
+            **({'profile':profile} if profile is not None else {})})
         return wait_for(lambda:self.app.inference_jobs.get(identifier, 'local'))
+
+    def test_video_profile_has_bounded_options_metrics_and_separate_cache(self):
+        self.parts = [{'message':{'content':'影片譯文'}, 'done':True,
+            'load_duration':20_000_000, 'prompt_eval_duration':30_000_000, 'eval_duration':40_000_000}]
+        first = self.run_text('Keep the original file.', profile='video')
+        self.assertEqual(first['stage'], 'done')
+        payload = self.calls[-1]
+        self.assertEqual(json.loads(payload['messages'][1]['content'])['原文'], 'Keep the original file.')
+        self.assertEqual(payload['keep_alive'], '10m')
+        self.assertEqual(payload['options'], {'temperature':0, 'num_ctx':4096, 'num_predict':256})
+        self.assertEqual(first['timings']['loadMs'], 20)
+        self.assertEqual(first['timings']['promptMs'], 30)
+        self.assertEqual(first['timings']['generationMs'], 40)
+        self.assertGreaterEqual(first['timings']['queueMs'], 0)
+        repeated = self.run_text('Keep the original file.', profile='video')
+        self.assertTrue(repeated['cached'])
+        self.assertNotIn('loadMs', repeated['timings'])
+        general = self.run_text('Keep the original file.')
+        self.assertFalse(general['cached'])
+        self.assertEqual(self.calls[-1]['options']['num_ctx'], 8192)
+        self.run_text('word '*300, profile='video')
+        self.assertEqual(self.calls[-1]['options']['num_ctx'], 8192)
+
+    def test_video_profile_rejects_bad_settings_and_truncated_output(self):
+        for kind, profile in [('translate', 'unknown'), ('summarize', 'video'), ('explain', 'video')]:
+            with self.assertRaises(UserError) as error:
+                self.run_text(kind=kind, profile=profile)
+            self.assertEqual(error.exception.code, 'PROFILE')
+        self.parts = [{'message':{'content':'部分譯文'}, 'done':True, 'done_reason':'length'}]
+        result = self.run_text(profile='video')
+        self.assertEqual(result['error'], 'MODEL_TRUNCATED')
+        self.assertFalse(self.app.translation_cache)
+        self.parts = [{'message':{'content':'譯文'}, 'done':True, 'load_duration':'private',
+            'prompt_eval_duration':-1, 'eval_duration':True}]
+        result = self.run_text('different', profile='video')
+        self.assertEqual(set(result['timings']), {'queueMs', 'prepareMs'})
 
     def test_cache_requires_same_text_source_kind_and_model_digest(self):
         self.assertFalse(self.run_text()['cached'])

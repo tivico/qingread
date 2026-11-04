@@ -45,6 +45,7 @@ globalThis.QingReadLocal = {
     return ({queued:'正在排隊，等候本機模型…',reading:'本機模型正在處理原文…',generating:'本機模型正在產生結果…',cancelling:'正在取消本機工作，等候釋放模型…'})[event.stage] || '';
   },
   cancellationText(results) {
+    if(!results.length)return '';
     return results.every(result=>result.status==='fulfilled' || ['cancelled','done','failed'].includes(result.reason?.cancelState))
       ? '助手已確認該筆工作結束。' : '已送出取消要求，尚未確認助手停止；請稍後查看助手狀態。';
   },
@@ -216,7 +217,8 @@ globalThis.QingReadLocal = {
       // Files on disk and the already-running helper can have the same version
       // but different capabilities. Check the process before sending source text.
       const health = await this.request('/health',{token,signal:combined});
-      if (health?.inference_jobs !== true || health?.inference_client_identity !== true) {
+      if (health?.inference_jobs !== true || health?.inference_client_identity !== true ||
+          (body.profile === 'video' && health?.video_inference !== true)) {
         const error = new Error('目前執行中的本機助手尚未載入必要更新。請先結束其他工作，關閉助手視窗，再重新啟動本專案的 companion/start.cmd，然後重試。只重載外掛不會更新已開啟的助手。');
         error.code = 'COMPANION_UPDATE_REQUIRED';
         throw error;
@@ -253,20 +255,25 @@ globalThis.QingReadLocal = {
       throw error;
     } finally { combined.removeEventListener('abort',cancel); }
   },
-  translator(source, {onProgress,expectedIdentity} = {}) {
+  translator(source, {onProgress,expectedIdentity,profile} = {}) {
     const controller = new AbortController();
     const active = new Set(), settled = [], local = this;
     const remember = result => {settled.push(result);if(settled.length>32)settled.shift();};
     const handle = {
-      managed:true, identity:expectedIdentity,
+      managed:true, identity:expectedIdentity, lastMetrics:null,
       translate(text, {signal} = {}) {
+        handle.lastMetrics=null;
         const pending = local.request('/translate', {
-          body: { text, source, ...(handle.identity ? {expectedModelIdentity:handle.identity} : {}) }, signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+          body: { text, source, ...(profile ? {profile} : {}), ...(handle.identity ? {expectedModelIdentity:handle.identity} : {}) }, signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
           managed:true, onProgress
         });
         active.add(pending);
         pending.then(()=>{active.delete(pending);remember({status:'fulfilled'});},error=>{active.delete(pending);remember({status:'rejected',reason:{cancelState:error.cancelState}});});
-        return pending.then(result=>{handle.identity=result.modelIdentity || handle.identity;return result.text;});
+        return pending.then(result=>{
+          handle.identity=result.modelIdentity || handle.identity;
+          handle.lastMetrics={...result.timings,cached:result.cached === true};
+          return result.text;
+        });
       },
       async destroy() {controller.abort();const previous=settled.slice();return previous.concat(await Promise.allSettled([...active]));}
     };

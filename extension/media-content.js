@@ -2,7 +2,8 @@
   if (globalThis.__qingReadMedia) return;
   globalThis.__qingReadMedia = true;
   let session = null, video = null, box = null, textNode = null, originalNode = null, lastCue = '', cueVersion = 0, mode = 'captions', timelineVersion = 0, videoEvents;
-  const MIN_HOLD = 2000, GAP_HOLD = 1200, MAX_STALE = 6000, SPEECH_HOLD = 8000;
+  const MIN_HOLD = 2000, GAP_HOLD = 1200, MAX_STALE = 6000, SPEECH_HOLD = 8000, RECENT_CUE = 2500;
+  let delayNode = null;
   let displayed = null, pending = null, emptySince = null, bilingual = false, sizeObserver;
   const cueHistory = new Map();
   let sourceStyle = null, mutedSource = null;
@@ -65,12 +66,13 @@
   }
   function readCue() {
     const current = cue();
+    const now = performance.now();
     if (current !== lastCue) {
       lastCue = current; cueVersion++;
-      emptySince = current ? null : performance.now();
-      cueHistory.set(cueVersion, {text:current, at:performance.now()});
+      emptySince = current ? null : now;
+      cueHistory.set(cueVersion, {text:current, at:now, lastSeen:now});
       if (cueHistory.size > 32) cueHistory.delete(cueHistory.keys().next().value);
-    }
+    } else if (current && cueHistory.has(cueVersion)) cueHistory.get(cueVersion).lastSeen = now;
     return { text: current, version: cueVersion, timelineVersion, time: video?.currentTime || 0, paused: video?.paused ?? true,
       display: { visible:Boolean(box?.isConnected), current:Boolean(displayed && matchesCurrent(displayed)), pending:Boolean(pending) } };
   }
@@ -92,6 +94,15 @@
     }
     return false;
   }
+  function canShow(message) {
+    if (message.allowRecent && (message.version < (displayed?.version ?? -1) ||
+        message.version < (pending?.version ?? -1))) return false;
+    if (matchesCurrent(message)) return true;
+    if (mode !== 'captions' || !message.allowRecent || !lastCue ||
+        message.timelineVersion !== timelineVersion) return false;
+    const seen = cueHistory.get(message.version);
+    return seen?.text === normalize(message.original) && performance.now() - seen.lastSeen <= RECENT_CUE;
+  }
   function position() {
     positionControl();
     if (!box || !video?.isConnected) return;
@@ -106,17 +117,20 @@
       width:width+'px', '--caption-max-height':Math.max(90,Math.min(320,rect.height*.48))+'px'
     });
   }
-  function show(original, translated) {
+  function show(original, translated, delayed) {
     if (!video?.isConnected) return;
     if (!box) {
       box = document.createElement('div'); box.dataset.qingreadMedia = 'true';
       const shadow = box.attachShadow({mode:'closed'}), style = document.createElement('style');
-      style.textContent = ':host{position:fixed!important;z-index:2147483646!important;pointer-events:none!important;display:block!important;color-scheme:dark}section{box-sizing:border-box;background:rgba(15,24,22,.92);color:white;border-radius:10px;padding:10px 18px;text-align:center;font:600 clamp(16px,2.2vw,21px)/1.55 system-ui;box-shadow:0 3px 15px #0005;max-height:var(--caption-max-height,240px);overflow:auto;pointer-events:auto;scrollbar-width:thin}small{display:block;font:14px/1.5 system-ui;color:#d5dedb;margin-bottom:5px}small[hidden]{display:none}p{margin:0;min-height:3.1em;display:flex;align-items:center;justify-content:center;white-space:pre-wrap;overflow-wrap:anywhere}';
-      const wrapper = document.createElement('section'); originalNode = document.createElement('small'); textNode = document.createElement('p'); wrapper.append(originalNode,textNode); shadow.append(style,wrapper);
+      style.textContent = ':host{position:fixed!important;z-index:2147483646!important;pointer-events:none!important;display:block!important;color-scheme:dark}section{box-sizing:border-box;background:rgba(15,24,22,.92);color:white;border-radius:10px;padding:10px 18px;text-align:center;font:600 clamp(16px,2.2vw,21px)/1.55 system-ui;box-shadow:0 3px 15px #0005;max-height:var(--caption-max-height,240px);overflow:auto;pointer-events:auto;scrollbar-width:thin}small{display:block;font:14px/1.5 system-ui;color:#d5dedb;margin-bottom:5px}small[hidden],.delay[hidden]{display:none}.delay{display:block;font:12px/1.5 system-ui;color:#efd59b}p{margin:0;min-height:3.1em;display:flex;align-items:center;justify-content:center;white-space:pre-wrap;overflow-wrap:anywhere}';
+      const wrapper = document.createElement('section'); originalNode = document.createElement('small'); textNode = document.createElement('p');
+      delayNode = document.createElement('span'); delayNode.className = 'delay'; delayNode.textContent = '譯文稍有延遲';
+      wrapper.append(delayNode,originalNode,textNode); shadow.append(style,wrapper);
       document.documentElement.append(box);
     }
     position();
     originalNode.hidden = !bilingual;
+    delayNode.hidden = !delayed;
     if (originalNode.textContent !== original) originalNode.textContent = original;
     if (textNode.textContent !== translated) textNode.textContent = translated;
     muteSource();
@@ -126,18 +140,20 @@
     if (!video?.isConnected) { remove(); return; }
     const now = performance.now();
     if (mode === 'captions') readCue();
-    if (pending && !matchesCurrent(pending)) pending = null;
+    if (pending && !canShow(pending)) pending = null;
     if (pending && (!displayed || now - displayed.shownAt >= MIN_HOLD)) {
       displayed = {...pending, shownAt:now}; pending = null;
-      show(displayed.original, displayed.text);
+      show(displayed.original, displayed.text, !matchesCurrent(displayed));
     }
     if (!displayed) return;
     const age = now - displayed.shownAt;
     if (mode === 'speech') { if (age >= SPEECH_HOLD) remove(); return; }
+    if (delayNode) delayNode.hidden = matchesCurrent(displayed);
     // Pausing is a reading action: keep the caption until resume, seek, or stop.
     if (video.paused) return;
     if ((emptySince !== null && now-emptySince >= GAP_HOLD && age >= MIN_HOLD) ||
-        (!matchesCurrent(displayed) && age >= MAX_STALE)) remove();
+        (!matchesCurrent(displayed) && age >= MAX_STALE) ||
+        (lastCue && displayed.allowRecent && !canShow(displayed) && age >= MIN_HOLD)) remove();
     else muteSource();
   }
   function invalidateTimeline() {
@@ -169,6 +185,20 @@
     const fromBackground=sender.url===chrome.runtime.getURL('background.js')&&message.type?.startsWith('qingread:media-');
     if (sender.id !== chrome.runtime.id || (!fromPanel&&!fromBackground)) return;
     if (message.type === 'qingread:media-start') {
+      if (message.handoff !== undefined) {
+        if (!fromBackground || message.handoff !== session || message.mode !== mode ||
+            !video?.isConnected || visibleVideo() !== video) {
+          reply({ok:false,error:'字幕來源已變更，請保留側欄並重新開始。'});
+          return;
+        }
+        session = message.session;
+        bilingual = message.bilingual === true;
+        backgroundControl?.remove();backgroundControl=null;
+        if(message.background)addBackgroundControl();
+        position();
+        reply({ok:true});
+        return;
+      }
       remove(); sizeObserver?.disconnect(); video = visibleVideo(); session = message.session; mode = message.mode;
       backgroundControl?.remove();backgroundControl=null;
       bilingual = message.bilingual === true; cueHistory.clear(); lastCue = ''; emptySince = null; cueVersion++;
@@ -185,9 +215,10 @@
     else if (message.type === 'qingread:media-show' && message.session === session) {
       if (mode === 'captions') readCue();
       const valid = typeof message.original === 'string' && typeof message.text === 'string' &&
-        Boolean(message.text.trim()) && message.text.length <= 12000 && matchesCurrent(message);
+        Boolean(message.text.trim()) && message.text.length <= 12000 && canShow(message);
       if (valid && !(displayed?.original === message.original && displayed?.text === message.text && matchesCurrent(displayed))) {
-        pending = {original:normalize(message.original),text:message.text,version:message.version,timelineVersion:message.timelineVersion};
+        pending = {original:normalize(message.original),text:message.text,version:message.version,timelineVersion:message.timelineVersion,
+          allowRecent:message.allowRecent === true};
         refreshDisplay();
       }
       reply({ok:true,applied:valid});

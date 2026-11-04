@@ -1,6 +1,6 @@
 'use strict';
 (() => {
-  let session=null, prepared=null, preparing=null, preparingTarget=null, status='背景字幕尚未啟動。';
+  let session=null, prepared=null, preparing=null, preparingTarget=null, status='背景字幕尚未啟動。', timing=null;
   const host=async(action,data={})=>{
     const result=await chrome.runtime.sendMessage({type:'qingread:video-host',action,...data});
     if(result?.error)throw new Error(result.error);
@@ -9,8 +9,8 @@
   // Offscreen documents only expose runtime; never send credentials to a website.
   QingReadLocal.savedToken=async()=> (await host('token')).token;
   const send=(target,message)=>host('media',{target,message});
-  const say=text=>{status=text;};
-  function snapshot(){return {active:Boolean(session),preparing:Boolean(prepared||preparing),id:session?.id,target:session?.target,status,mode:session?.mode};}
+  const say=(text,value)=>{status=text;if(value)timing=value;};
+  function snapshot(){return {active:Boolean(session),preparing:Boolean(prepared||preparing),id:session?.id,target:session?.target,status,mode:session?.mode,timing};}
   function waitForEngine(promise,s){
     return new Promise((resolve,reject)=>{
       const abort=()=>reject(new DOMException('Stopped','AbortError'));
@@ -25,12 +25,12 @@
     preparing?.abort();preparing=null;preparingTarget=null;
     if(prepared){clearTimeout(prepared.timer);prepared.translator.destroy();prepared=null;}
   }
-  function stop(reason='字幕已停止。'){
+  function stop(reason='字幕已停止。', releaseSource=true){
     const old=session;session=null;say(reason);
     if(old){
       old.clock?.terminate();old.controller.abort();old.speechQueue.clear();
       old.stream?.getTracks().forEach(track=>track.stop());void old.audio?.close().catch(()=>{});
-      void send(old.target,{type:'qingread:media-stop',session:old.id}).catch(()=>{});
+      if(releaseSource)void send(old.target,{type:'qingread:media-stop',session:old.id}).catch(()=>{});
       Promise.resolve(old.translator.destroy()).then(results=>{
         if(!session&&status===reason&&old.translator.managed)say(reason+' '+QingReadLocal.cancellationText(results));
       }).catch(()=>{}).finally(idle);
@@ -43,8 +43,9 @@
     let translator;
     try{
       if(config.engine==='local'){
-        await QingReadLocal.request('/health',{signal:controller.signal});
-        translator=QingReadLocal.translator(config.source);
+        const health=await QingReadLocal.request('/health',{signal:controller.signal});
+        if(health?.video_inference!==true)throw new Error('請先結束其他工作，重新啟動新版清讀助手，再收合字幕。');
+        translator=QingReadLocal.translator(config.source,{profile:'video'});
       }else{
         if(!globalThis.Translator)throw new Error('此 Chrome 無法在背景使用語言包；側欄字幕會繼續，請更新瀏覽器後再試。');
         const creation=Promise.resolve(Translator.create({sourceLanguage:config.source,targetLanguage:'zh-Hant',signal:controller.signal}));
@@ -65,13 +66,17 @@
   async function commit(ticket){
     if(!prepared||prepared.ticket!==ticket)throw new Error('字幕交接已逾時，請重新開始字幕。');
     const p=prepared;prepared=null;clearTimeout(p.timer);
-    const s={...p.config,id:crypto.randomUUID(),target:p.target,tabId:p.target.tabId,windowId:p.target.windowId,translator:p.translator,controller:new AbortController(),busy:false,reading:false,dropped:0,skipped:0,
-      cues:QingReadCaptions.createCueBuffer(),speechQueue:QingReadSpeech.createLatestBuffer(),cache:new Map(),cacheEnabled:p.config.engine!=='local'};
+    timing=null;
+    const s={...p.config,id:crypto.randomUUID(),ticket:p.ticket,target:p.target,tabId:p.target.tabId,windowId:p.target.windowId,translator:p.translator,controller:new AbortController(),busy:false,reading:false,dropped:0,skipped:0,
+      cues:QingReadCaptions.createCueBuffer({adaptive:true}),speechQueue:QingReadSpeech.createLatestBuffer(),cache:new Map(),cacheEnabled:p.config.engine!=='local'};
     session=s;
     const live=()=>{if(session!==s)throw new DOMException('Stopped','AbortError');};
+    let claimed=false;
     try{
-      const result=await send(s.target,{type:'qingread:media-start',session:s.id,mode:s.mode,bilingual:s.bilingual,background:true});live();
+      const result=await send(s.target,{type:'qingread:media-start',session:s.id,mode:s.mode,bilingual:s.bilingual,background:true,
+        ...(s.mode==='captions'?{handoff:p.ticket}:{})});live();
       if(!result?.ok)throw new Error(result?.error||'找不到影片。');
+      claimed=true;
       if(s.mode==='speech'){
         const capture=await host('capture',{target:s.target});live();
         const stream=await navigator.mediaDevices.getUserMedia({audio:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:capture.streamId}},video:false});
@@ -87,7 +92,15 @@
       s.clock.onmessage=()=>{if(session===s)void (s.mode==='captions'?pipeline.captions(s):pipeline.watchSpeech(s));};
       s.clock.onerror=()=>{if(session===s)stop('背景字幕計時器中斷，請重新開始。');};
       say('字幕正在背景執行，可全螢幕觀看；影片右上角可停止。');return snapshot();
-    }catch(error){if(session===s)stop(error.message);throw error;}
+    }catch(error){
+      if(session===s){
+        if(claimed&&s.mode==='captions'){
+          await send(s.target,{type:'qingread:media-start',session:p.ticket,handoff:s.id,mode:s.mode,bilingual:s.bilingual,background:false}).catch(()=>{});
+          if(session===s)stop(error.message,false);
+        }else stop(error.message);
+      }
+      throw error;
+    }
   }
   chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     if(message.type!=='qingread:video-offscreen'||sender.id!==chrome.runtime.id||sender.url!==chrome.runtime.getURL('background.js'))return;
@@ -95,7 +108,12 @@
       if(message.action==='prepare')return prepare(message.config,message.target,message.ticket);
       if(message.action==='commit')return commit(message.ticket);
       if(message.action==='status')return snapshot();
-      if(message.action==='cancel-prepare'){discardPrepared();idle();return snapshot();}
+      if(message.action==='cancel-prepare'){
+        discardPrepared();
+        if(message.ticket && session?.ticket===message.ticket)stop('已取消收合。');
+        else idle();
+        return snapshot();
+      }
       if(message.action==='stop'){discardPrepared();stop(message.reason);return snapshot();}
       if(message.action==='event'){
         const target=session?.target||prepared?.target||preparingTarget;

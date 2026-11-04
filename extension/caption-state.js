@@ -12,7 +12,7 @@
     return false;
   }
 
-  function createCueBuffer() {
+  function createCueBuffer({adaptive = false} = {}) {
     let pending = null, submitted = null;
     return {
       observe(cue, now) {
@@ -27,11 +27,16 @@
         pending = { text, version: cue.version, timelineVersion, key,
           firstSeen: growing ? pending.firstSeen : now, changedAt: now };
       },
-      take(now) {
+      take(now, translationMs = 0) {
         if (!pending || pending.key === submitted) return null;
-        if (now - pending.changedAt < TIMING.settle && now - pending.firstSeen < TIMING.maxWait) return null;
+        const complete = /[。！？.!?][)"'’”」』]*$/u.test(pending.text);
+        const short = pending.text.length <= 60;
+        const settle = adaptive ? (complete ? 250 : short ? 350 : TIMING.settle) : TIMING.settle;
+        const maxWait = adaptive ? (translationMs >= 1000 ? 1000 : 1500) : TIMING.maxWait;
+        if (now - pending.changedAt < settle && now - pending.firstSeen < maxWait) return null;
         submitted = pending.key;
-        return { text: pending.text, version: pending.version, timelineVersion: pending.timelineVersion };
+        return { text: pending.text, version: pending.version, timelineVersion: pending.timelineVersion,
+          ...(adaptive ? {waitMs:now-pending.firstSeen} : {}) };
       }
     };
   }

@@ -142,6 +142,8 @@ test('caption status follows visible captions and reports slow or skipped result
     await page.evaluate(() => { harness.cue.display = {visible:true,current:true}; });
     await page.clock.runFor(250);
     assert.match(await page.locator('#video-status').textContent(), /舒適閱讀中.*最近翻譯/);
+    assert.match(await page.locator('#video-timing').textContent(), /送翻前等待.*翻譯往返/);
+    assert.doesNotMatch(await page.locator('#video-timing').textContent(), /助手排隊/);
     await page.evaluate(() => {
       harness.cue = {...harness.cue,text:'A different topic.',version:2,display:{visible:false,current:false}};
       harness.applied = false;
@@ -149,7 +151,7 @@ test('caption status follows visible captions and reports slow or skipped result
     await page.clock.runFor(1000);
     await page.evaluate(() => harness.release());
     await page.clock.runFor(250);
-    assert.match(await page.locator('#video-status').textContent(), /已略過 1 段過期結果/);
+    assert.match(await page.locator('#video-status').textContent(), /已收到 1 筆譯文，已略過 1 筆舊結果/);
     assert.doesNotMatch(await page.locator('#video-status').textContent(), /舒適閱讀中/);
     assert.equal(await page.evaluate(() => harness.messages.some(m => /pause|seek|rate/.test(m.type))), false);
     await page.locator('#video-stop').click();
@@ -157,31 +159,188 @@ test('caption status follows visible captions and reports slow or skipped result
   } finally { await page.close(); }
 });
 
-async function speechPanel(){
+async function speechPanel({deferResume=false}={}){
   const page=await panelFixture();
-  await page.evaluate(()=>{
+  await page.evaluate(({deferResume})=>{
     harness.recognizers=[];harness.timeline=1;harness.time=4.5;harness.trackStops=0;
     chrome.permissions={request:async()=>true};chrome.runtime={sendMessage:async()=>({streamId:'synthetic'})};
-    const track={stop(){harness.trackStops++;},addEventListener(){}};
-    Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUserMedia:async()=>({getTracks:()=>[track]})}});
-    globalThis.AudioContext=class{constructor(){this.audioWorklet={addModule:async()=>{}};this.destination={};}createMediaStreamSource(){return {connect(){}};}async resume(){}async close(){}};
+    chrome.tabs.query=async()=>[{id:7,windowId:3,url:'https://article.test/'}];
+    Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUserMedia:async()=>{
+      const track={stop(){harness.trackStops++;},addEventListener(){}};return {getTracks:()=>[track]};
+    }}});
+    globalThis.AudioContext=class{constructor(){this.audioWorklet={addModule:async()=>{}};this.destination={};}createMediaStreamSource(){return {connect(){}};}resume(){return deferResume?new Promise(resolve=>harness.finishResume=resolve):Promise.resolve();}async close(){}};
     globalThis.AudioWorkletNode=class{constructor(){this.port={postMessage(message){harness.audioEpoch=message.epoch;harness.resets=(harness.resets||0)+1;}};harness.audioPort=this.port;}connect(){}};
     chrome.tabs.sendMessage=async(_id,message)=>{
       harness.messages.push(message);
       if(message.type==='qingread:media-read')return {paused:false,time:harness.time,timelineVersion:harness.timeline};
       return {ok:true,applied:true};
     };
-    Translator.create=async()=>({destroy(){},translate:async text=>{harness.translations.push(text);return '測試譯文';}});
+    Translator.create=async({signal})=>{
+      harness.created++;let destroyed=false;
+      // Match the native API: aborting create's signal destroys the model too.
+      signal.addEventListener('abort',()=>{destroyed=true;harness.creationAborts=(harness.creationAborts||0)+1;},{once:true});
+      return {destroy(){harness.destroyed++;destroyed=true;},translate:async text=>{
+        if(destroyed)throw new DOMException('Model destroyed','AbortError');
+        harness.translations.push(text);return '測試譯文';
+      }};
+    };
     QingReadLocal.request=async(path,options)=>{
       harness.speechSignal=options.signal;
       return new Promise(resolve=>harness.recognizers.push(resolve));
     };
     harness.emitFrame=sequence=>{harness.time=4.5+sequence*4;harness.audioPort.onmessage({data:{samples:new Float32Array(72000),sequence,epoch:harness.audioEpoch||0,durationMs:4500,overlapMs:sequence?500:0}});};
-  });
+  },{deferResume});
   await page.locator('[data-view=video]').click();await page.selectOption('#video-mode','speech');await page.locator('#video-start').click();
   await page.waitForFunction(()=>Boolean(harness.audioPort));
   return page;
 }
+
+test('stopping while speech audio resumes prevents late listening status and collapse controls',async()=>{
+ const page=await speechPanel({deferResume:true});
+ try{
+  await page.waitForFunction(()=>Boolean(harness.finishResume));
+  await page.locator('#video-stop').click();await page.evaluate(()=>harness.finishResume());
+  await page.evaluate(()=>new Promise(r=>setTimeout(r,0)));
+  assert.equal(await page.locator('#video-status').textContent(),'字幕已停止。');
+  assert.equal(await page.locator('#video-collapse').isDisabled(),true);
+  assert.equal(await page.locator('#video-start').isEnabled(),true);
+  assert.equal(await page.evaluate(()=>harness.trackStops),1);
+  assert.equal(await page.evaluate(()=>harness.destroyed),1);
+ }finally{await page.close();}
+});
+
+test('failed speech handoff restores a fresh side-panel pipeline with the retained translator',async()=>{
+ const page=await speechPanel();
+ try{
+  await page.waitForFunction(()=>!document.querySelector('#video-collapse').disabled);
+  await page.evaluate(()=>{
+   harness.controls=[];harness.captures=[];
+   chrome.runtime.sendMessage=async message=>{
+    if(message.type==='qingread:capture'){harness.captures.push(message);return {streamId:'restored'};}
+    harness.controls.push(message);
+    if(message.action==='commit')return {error:'測試背景音訊啟動失敗'};
+    return message.action==='prepare'?{ready:true}:{active:false};
+   };
+  });
+  await page.locator('#video-collapse').click();
+  await page.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('已恢復側欄'));
+  assert.equal(await page.evaluate(()=>harness.created),1,'Rollback reuses the translator without a new activation gesture');
+  assert.equal(await page.evaluate(()=>harness.destroyed),0);
+  assert.equal(await page.evaluate(()=>harness.creationAborts||0),0,'Suspension cancels requests without destroying the retained Chrome model');
+  assert.equal(await page.evaluate(()=>harness.trackStops),1);
+  assert.deepEqual(await page.evaluate(()=>harness.captures),[{type:'qingread:capture',tabId:7,windowId:3,waitForRelease:true}]);
+  const starts=await page.evaluate(()=>harness.messages.filter(m=>m.type==='qingread:media-start'));
+  assert.equal(starts.length,2);assert.notEqual(starts[0].session,starts[1].session);
+  assert.equal(await page.locator('#video-collapse').isEnabled(),true);
+  await page.evaluate(()=>harness.emitFrame(0));await page.waitForFunction(()=>harness.recognizers.length===1);
+  await page.evaluate(()=>harness.recognizers[0]({text:'Recovered speech',segments:[]}));
+  await page.waitForFunction(()=>harness.translations.length===1);
+  await page.locator('#video-stop').click();assert.equal(await page.evaluate(()=>harness.trackStops),2);
+  assert.equal(await page.evaluate(()=>harness.destroyed),1);
+ }finally{await page.close();}
+});
+
+test('stop, navigation or starting another feature during suspended speech handoff cancels its original ticket without restarting audio',async()=>{
+ for(const action of ['stop','navigate','text']){
+  const page=await speechPanel();
+  try{
+   await page.waitForFunction(()=>!document.querySelector('#video-collapse').disabled);
+   await page.evaluate(()=>{
+    harness.controls=[];harness.captures=[];
+    chrome.runtime.sendMessage=async message=>{
+     if(message.type==='qingread:capture'){harness.captures.push(message);return {streamId:'unexpected'};}
+     harness.controls.push(message);
+     if(message.action==='commit')return new Promise(resolve=>harness.finishCommit=()=>resolve({active:true,status:'Late background start'}));
+     return message.action==='prepare'?{ready:true}:{active:false};
+    };
+   });
+   await page.locator('#video-collapse').click();await page.waitForFunction(()=>Boolean(harness.finishCommit));
+   if(action==='stop')await page.locator('#video-stop').click();
+   else if(action==='navigate')await page.evaluate(()=>harness.onUpdated(7,{url:'https://article.test/new'}));
+   else await page.evaluate(()=>{
+    document.querySelector('[data-view=text]').click();
+    // Dispatch the cross-feature cancellation listener without submitting text.
+    document.querySelector('#text-start').dispatchEvent(new Event('click'));
+    document.querySelector('[data-view=video]').click();
+   });
+   await page.evaluate(()=>harness.finishCommit());
+   await page.waitForFunction(()=>harness.destroyed===1);
+   assert.equal(await page.evaluate(()=>harness.captures.length),0);
+   assert.equal(await page.locator('#video-collapse').isDisabled(),true);
+   assert.equal(await page.locator('#video-start').isEnabled(),true);
+   const state=await page.evaluate(()=>({ticket:harness.messages.find(m=>m.type==='qingread:media-start').session,controls:harness.controls}));
+   assert.ok(state.controls.filter(m=>m.action==='cancel-prepare').every(m=>m.ticket===state.ticket));
+   assert.equal(state.controls.some(m=>m.action==='collapse'),false);
+  }finally{await page.close();}
+ }
+});
+
+test('speech handoff recovery failure reports the problem and leaves restart available',async()=>{
+ const page=await speechPanel();
+ try{
+  await page.waitForFunction(()=>!document.querySelector('#video-collapse').disabled);
+  await page.evaluate(()=>{
+   chrome.runtime.sendMessage=async message=>message.type==='qingread:capture'?{error:'測試音訊無法重新取得'}:
+    message.action==='commit'?{error:'測試背景失敗'}:message.action==='prepare'?{ready:true}:{active:false};
+  });
+  await page.locator('#video-collapse').click();
+  await page.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('側欄字幕未能恢復'));
+  assert.match(await page.locator('#video-status').textContent(),/音訊無法重新取得/);
+  assert.equal(await page.locator('#video-start').isEnabled(),true);
+  assert.equal(await page.locator('#video-collapse').isDisabled(),true);
+  assert.equal(await page.evaluate(()=>harness.destroyed),1);
+ }finally{await page.close();}
+});
+
+test('speech handoff never reacquires audio without an acknowledged background cancellation',async()=>{
+ const page=await speechPanel();
+ try{
+  await page.waitForFunction(()=>!document.querySelector('#video-collapse').disabled);
+  await page.evaluate(()=>{
+   harness.captures=0;
+   chrome.runtime.sendMessage=async message=>{
+    if(message.type==='qingread:capture'){harness.captures++;return {streamId:'unexpected'};}
+    if(message.action==='prepare')return {ready:true};
+    if(message.action==='commit')return {error:'背景提交回應遺失'};
+    return undefined;
+   };
+  });
+  await page.locator('#video-collapse').click();
+  await page.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('無法確認背景'));
+  assert.equal(await page.evaluate(()=>harness.captures),0);
+  assert.equal(await page.evaluate(()=>harness.destroyed),1);
+  assert.equal(await page.locator('#video-collapse').isDisabled(),true);
+ }finally{await page.close();}
+});
+
+test('speech capture failure preserves its recovery instruction without claiming an uncreated helper job finished',async()=>{
+ const page=await panelFixture();
+ try{
+  await page.evaluate(()=>{
+   chrome.tabs.query=async()=>[{id:7,windowId:3,url:'https://article.test/'}];
+   chrome.permissions={request:async()=>true};
+   chrome.runtime={sendMessage:async message=>{
+    harness.captureRequest=message;
+    return {error:'請回到影片分頁，點 Chrome 工具列的清讀圖示，再按開始字幕。',code:'CAPTURE_INVOKE'};
+   }};
+   chrome.tabs.sendMessage=async(_id,message)=>{harness.messages.push(message);return {ok:true};};
+   QingReadLocal.translator=()=>({managed:true,destroy:async()=>{harness.destroyed++;return [];}});
+   document.querySelector('#engine').value='local';
+  });
+  await page.locator('[data-view=video]').click();await page.selectOption('#video-mode','speech');
+  await page.locator('#video-start').click();
+  await page.waitForFunction(()=>document.querySelector('#video-status').textContent.includes('工具列'));
+  // Drain the asynchronous translator cleanup before checking the final message.
+  await page.evaluate(()=>new Promise(r=>setTimeout(r,0)));
+  assert.equal(await page.locator('#video-status').textContent(),'請回到影片分頁，點 Chrome 工具列的清讀圖示，再按開始字幕。');
+  assert.deepEqual(await page.evaluate(()=>harness.captureRequest),{type:'qingread:capture',tabId:7,windowId:3});
+  assert.equal(await page.evaluate(()=>harness.destroyed),1);
+  assert.equal(await page.evaluate(()=>harness.messages.some(m=>m.type==='qingread:media-stop')),true);
+  assert.equal(await page.locator('#video-start').isEnabled(),true);
+  assert.equal(await page.locator('#video-mode').isEnabled(),true);
+  assert.equal(await page.locator('#video-collapse').isDisabled(),true);
+ }finally{await page.close();}
+});
 test('speech keeps only the latest waiting frame, rejects seeked audio, and stops late results',async()=>{
   const page=await speechPanel();
   try{
@@ -240,7 +399,7 @@ async function fixture(url='https://fixture.test/') {
   await page.addScriptTag({ path: path.join(extension, 'content.js') });
   return page;
 }
-test('extraction excludes hidden, form, editable and code content; inline text is preserved', async () => {
+test('extraction excludes hidden, form, editable and block code; inline text is preserved', async () => {
   const page = await fixture();
   try {
     const result = await page.evaluate(() => message({ type: 'qingread:collect', job: 'one', scope: 'page' }));
@@ -249,6 +408,38 @@ test('extraction excludes hidden, form, editable and code content; inline text i
     assert.match(text, /Friday\. Do not delete the backup\./);
     assert.match(text, /Keep inline spaces\./);
     assert.ok(result.items.length > 3);
+  } finally { await page.close(); }
+});
+test('documentation paragraphs stay separate and preserve inline literals while excluding example tabs', async () => {
+  const page = await fixture();
+  try {
+    await page.setContent(`
+      <div><header data-layout-item="page-header"><h1>Local API</h1><button>Copy page</button></header>
+      <div class="mdx-content" data-page-title="Local API" data-page-href="/api">
+        <span data-as="p">Call <code>/api/show</code> to get settings.</span>
+        <span data-as="p">The server returns <code>message.content</code> as text.</span>
+        <ul><li><code>true</code>: enable the option.</li></ul>
+        <ul role="tablist"><li role="tab"><div>JavaScript</div></li><li role="tab">Python</li></ul>
+        <pre><code>DO_NOT_TRANSLATE()</code></pre>
+      </div><div>Previous page</div></div>`);
+    const result = await page.evaluate(async () => {
+      const batch = await message({type:'qingread:collect',job:'docs',scope:'page'});
+      const summary = await message({type:'qingread:summary-source',job:'summary',scope:'page'});
+      const apply = index => message({type:'qingread:apply',job:'docs',id:batch.items[index].id,text:'人工譯文'});
+      const applied = await apply(1);
+      const besideParagraph = document.querySelector('[data-as=p]').nextElementSibling.matches('[data-qingread]');
+      document.querySelectorAll('[data-as=p] code')[1].textContent = 'message.thinking';
+      const stale = await apply(2);
+      return {batch,summary,applied,besideParagraph,stale};
+    });
+    const expected = ['Local API','Call /api/show to get settings.',
+      'The server returns message.content as text.','true: enable the option.'];
+    assert.deepEqual(result.batch.items.map(item => item.text), expected);
+    assert.deepEqual(result.summary.items.map(item => item.text), expected);
+    assert.deepEqual(result.batch.items[1].parts, ['Call ', {literal:'/api/show'}, ' to get settings.']);
+    assert.equal(result.applied.applied, true);
+    assert.equal(result.besideParagraph, true);
+    assert.equal(result.stale.applied, false);
   } finally { await page.close(); }
 });
 const moeaArticleUrl='https://www.moea.gov.tw/MNS/doit/industrytech/IndustryTech.aspx?menu_id=13545&it_id=563#top';
@@ -316,6 +507,87 @@ test('selected translation sends only the selected characters', async () => {
     assert.equal(result.items[0].text, 'Select only this sentence.');
   } finally { await page.close(); }
 });
+test('successive selections in one paragraph stay separate from its full translation', async () => {
+  const page = await fixture();
+  try {
+    const result = await page.evaluate(async () => {
+      const paragraph = document.querySelector('#selection');
+      const source = 'Alpha beta and Gamma delta.';
+      paragraph.textContent = source;
+      const collect = (job, scope) => message({type:'qingread:collect', job, scope});
+      const apply = (job, id) => message({type:'qingread:apply', job, id, text:'測試譯文'});
+      function select(start, end) {
+        const range = document.createRange();
+        range.setStart(paragraph.firstChild, start);
+        range.setEnd(paragraph.firstChild, end);
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+      }
+      select(0, 10);
+      const [first] = (await collect('first','selection')).items;
+      const firstApplied = await apply('first', first.id);
+      select(15, 26);
+      const [second] = (await collect('second','selection')).items;
+      paragraph.firstChild.appendData(' Unselected ending.');
+      const secondApplied = await apply('second', second.id);
+      const selectedCount = document.querySelectorAll('[data-qingread-scope=selection]').length;
+      const whole = (await collect('whole','page')).items.find(item => item.text.startsWith(source));
+      const wholeApplied = await apply('whole', whole.id);
+      select(0, 10);
+      const [third] = (await collect('third','selection')).items;
+      paragraph.firstChild.replaceData(0, 5, 'Other');
+      const stale = await apply('third', third.id);
+      return {
+        first: first.text, second: second.text, firstApplied, secondApplied, selectedCount,
+        whole: whole.text, wholeApplied, third: third.text, stale,
+        selectedAfterWhole: document.querySelectorAll('[data-qingread-scope=selection]').length
+      };
+    });
+    assert.equal(result.first, 'Alpha beta');
+    assert.equal(result.second, 'Gamma delta');
+    assert.equal(result.firstApplied.applied, true);
+    assert.equal(result.secondApplied.applied, true);
+    assert.equal(result.selectedCount, 1);
+    assert.equal(result.whole, 'Alpha beta and Gamma delta. Unselected ending.');
+    assert.equal(result.wholeApplied.applied, true);
+    assert.equal(result.third, 'Alpha beta');
+    assert.equal(result.stale.applied, false);
+    assert.equal(result.selectedAfterWhole, 0);
+  } finally { await page.close(); }
+});
+test('new inline text invalidates pending and displayed translations without clearing other paragraphs', async () => {
+  const page = await fixture();
+  try {
+    const result = await page.evaluate(async () => {
+      const paragraph = document.querySelector('#article');
+      const other = document.querySelector('#selection');
+      const apply = id => message({type:'qingread:apply', job:'live', id, text:'人工譯文'});
+      const batch = await message({type:'qingread:collect', job:'live', scope:'page'});
+      const article = batch.items.find(item => item.text.startsWith('The deployment'));
+      const selection = batch.items.find(item => item.text.startsWith('Select only'));
+      const stable = await apply(selection.id);
+      paragraph.append(Object.assign(document.createElement('em'), {textContent:' Added by site.'}));
+      const stale = await apply(article.id);
+      const updated = await message({type:'qingread:collect', job:'updated', scope:'page'});
+      const latest = updated.items.find(item => item.text.startsWith('The deployment'));
+      const applied = await message({type:'qingread:apply', job:'updated', id:latest.id, text:'新版譯文'});
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const displayed = paragraph.nextElementSibling?.matches('[data-qingread=translation]');
+      paragraph.querySelector('em').textContent = ' Changed again.';
+      await new Promise(resolve => setTimeout(resolve, 0));
+      return {stable, stale, applied, displayed, latest:latest.text,
+        oldRemoved: !paragraph.nextElementSibling?.matches('[data-qingread=translation]'),
+        otherPreserved: other.nextElementSibling?.matches('[data-qingread=translation]')};
+    });
+    assert.equal(result.stable.applied, true);
+    assert.equal(result.stale.applied, false);
+    assert.equal(result.applied.applied, true);
+    assert.match(result.latest, /Added by site/);
+    assert.equal(result.displayed, true);
+    assert.equal(result.oldRemoved, true);
+    assert.equal(result.otherPreserved, true);
+  } finally { await page.close(); }
+});
 test('safe insertion, stale-result rejection, deduplication and restoration', async () => {
   const page = await fixture();
   try {
@@ -343,6 +615,62 @@ test('safe insertion, stale-result rejection, deduplication and restoration', as
     assert.equal(outcome.oldJob.applied, false);
   } finally { await page.close(); }
 });
+test('translation-only reuses existing results, preserves source structure and reads original text for summaries', async () => {
+  const page = await fixture();
+  try {
+    await page.setContent(`<main><h1 id="heading">Original heading</h1>
+      <p id="plain">Original paragraph</p><ol><li id="entry" value="4">List entry</li></ol>
+      <table><tr><td id="cell" colspan="2">Original cell</td></tr></table>
+      <div id="interactive">Instructions beside a control.<button>Keep this control</button></div></main>`);
+    const result = await page.evaluate(async () => {
+      const get = id => document.getElementById(id);
+      const visible = id => getComputedStyle(get(id)).display !== 'none';
+      const display = translationOnly => message({type:'qingread:display',translationOnly});
+      const collect = job => message({type:'qingread:collect',job,scope:'page'});
+      const apply = (job, item) => message({type:'qingread:apply',job,id:item.id,text:'測試譯文'});
+      const original = get('plain').firstChild;
+      const first = await collect('before');
+      await apply('before', first.items.find(item => item.text === 'Original paragraph'));
+      const host = get('plain').nextElementSibling;
+      const bilingual = visible('plain');
+      await display(true);
+      const reused = host === get('plain').nextElementSibling && !visible('plain');
+      const pending = await collect('during');
+      for (const item of pending.items) await apply('during', item);
+      const translatedHeading = get('heading').nextElementSibling;
+      const shape = {
+        heading: [translatedHeading.getAttribute('role'), translatedHeading.getAttribute('aria-level')],
+        cell: [get('cell').nextElementSibling.localName, get('cell').nextElementSibling.colSpan],
+        entry: [get('entry').nextElementSibling.localName, get('entry').nextElementSibling.value],
+        hidden: ['heading','cell','entry'].every(id => !visible(id)),
+        control: visible('interactive') && get('interactive').querySelector('button').getClientRects().length > 0
+      };
+      const summary = await message({type:'qingread:summary-source',job:'summary',scope:'page'});
+      await display(false);
+      const originalVisible = ['plain','heading','cell','entry'].every(visible);
+      const slotsRemoved = document.querySelectorAll('[data-qingread=replacement]').length === 0;
+      await display(true);
+      original.data = 'Updated paragraph';
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const invalidated = visible('plain') && !host.isConnected;
+      await message({type:'qingread:restore'});
+      return {bilingual,reused,shape,originalVisible,slotsRemoved,invalidated,
+        sourceKept:original === get('plain').firstChild,
+        summary:summary.items.map(item => item.text),
+        restored:visible('cell') && !document.querySelector('[data-qingread]') &&
+          (await message({type:'qingread:display'})).translationOnly === false};
+    });
+    assert.deepEqual(result.shape, {
+      heading:['heading','1'], cell:['td',2], entry:['li',4], hidden:true, control:true
+    });
+    for (const key of ['bilingual','reused','originalVisible','slotsRemoved','invalidated','sourceKept','restored']) {
+      assert.equal(result[key], true, key);
+    }
+    assert.ok(result.summary.includes('Original paragraph'));
+    assert.ok(result.summary.includes('Original cell'));
+    assert.ok(!result.summary.includes('測試譯文'));
+  } finally { await page.close(); }
+});
 
 async function panelFixture(mode = 'normal') {
   const page = await browser.newPage({ viewport: { width: 380, height: 1000 } });
@@ -362,6 +690,7 @@ async function panelFixture(mode = 'normal') {
         onUpdated: { addListener: fn => { const previous=state.onUpdated; state.onUpdated=(...args)=>{previous?.(...args);fn(...args);}; } },
         onRemoved: { addListener: fn => { const previous=state.onRemoved; state.onRemoved=(...args)=>{previous?.(...args);fn(...args);}; } },
         sendMessage: async (id, message, options) => {
+          if (message.type === 'qingread:display' && message.translationOnly === undefined) return {translationOnly:false};
           state.messages.push({ id, ...message, documentId: options.documentId });
           if (message.type.endsWith('collect') || message.type === 'qingread:summary-source') return { items, limited: false };
           if (message.type.endsWith('restore')) return { restored: true };
@@ -573,6 +902,41 @@ test('panel creates engine from user click, targets exact document, applies term
     await page.screenshot({ path: path.join(__dirname, '../test-results/panel-completed.png'), fullPage: true });
     await page.locator('#restore').click();
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('已還原'));
+  } finally { await page.close(); }
+});
+test('the web display checkbox switches only the active document without starting translation', async () => {
+  const page = await panelFixture();
+  try {
+    await page.evaluate(() => {
+      const states = {7:false, 8:false};
+      chrome.tabs.sendMessage = async (tab, message, options) => {
+        if (message.type === 'qingread:display') {
+          if (typeof message.translationOnly === 'boolean') {
+            harness.messages.push({tab, documentId:options.documentId, translationOnly:message.translationOnly});
+            states[tab] = message.translationOnly;
+          }
+          return {translationOnly:states[tab]};
+        }
+        if (message.type === 'qingread:restore') {
+          states[tab] = false;
+          return {restored:true};
+        }
+      };
+    });
+    const checkbox = page.locator('#translation-only');
+    await checkbox.check();
+    await page.waitForFunction(() => !document.querySelector('#translation-only').disabled && harness.messages.length === 1);
+    await page.evaluate(() => { harness.currentTab = 8; harness.onActivated({tabId:8}); });
+    await page.waitForFunction(() => !document.querySelector('#translation-only').checked);
+    await page.evaluate(() => { harness.currentTab = 7; harness.onActivated({tabId:7}); });
+    await page.waitForFunction(() => document.querySelector('#translation-only').checked);
+    await checkbox.uncheck();
+    await page.waitForFunction(() => !document.querySelector('#translation-only').disabled && harness.messages.length === 2);
+    assert.deepEqual(await page.evaluate(() => harness.messages), [
+      {tab:7, documentId:'doc-7', translationOnly:true},
+      {tab:7, documentId:'doc-7', translationOnly:false}
+    ]);
+    assert.equal(await page.evaluate(() => harness.created), 0);
   } finally { await page.close(); }
 });
 
@@ -1339,6 +1703,64 @@ test('text tab translates pasted text from the click without reading the page; t
   }finally{await page.close();}
 });
 
+test('Chrome pasted text preserves Chinese and translates only the foreign fragments', async () => {
+  const page = await panelFixture();
+  try {
+    await page.evaluate(() => {
+      Translator.create = () => {
+        harness.created++;
+        return Promise.resolve({
+          destroy() { harness.destroyed++; },
+          async translate(text) {
+            harness.translations.push(text);
+            return {'package':'套件','Read':'讀取'}[text] || '錯誤的整句譯文';
+          }
+        });
+      };
+    });
+    await page.locator('[data-view=text]').click();
+    await page.locator('#text-input').fill('權限只把 package 設成 Read');
+    assert.match(await page.locator('#text-language-hint').textContent(), /中文會保留/);
+    await page.locator('#text-start').click();
+    await page.waitForFunction(() => document.querySelector('#text-status').textContent.includes('中文已保留'));
+    assert.equal(await page.locator('#text-output').inputValue(), '權限只把 套件 設成 讀取');
+    assert.deepEqual(await page.evaluate(() => harness.translations), ['package','Read']);
+
+    const chinese = '權限只設為讀取。🙂\n'.repeat(150);
+    await page.locator('#text-input').fill(chinese);
+    await page.locator('#text-start').click();
+    await page.waitForFunction(() => document.querySelector('#text-status').textContent.includes('已保留原文'));
+    assert.equal(await page.locator('#text-output').inputValue(), chinese);
+    assert.equal(await page.evaluate(() => harness.created), 1);
+  } finally { await page.close(); }
+});
+
+test('Chinese preservation leaves Japanese and local-model sentence translation available', async () => {
+  const page = await panelFixture();
+  try {
+    await page.selectOption('#source','ja');
+    await page.locator('[data-view=text]').click();
+    const japanese = '権限は読み取り専用に設定します。';
+    await page.locator('#text-input').fill(japanese);
+    await page.locator('#text-start').click();
+    await page.waitForFunction(() => document.querySelector('#text-status').textContent.includes('翻譯完成'));
+    assert.deepEqual(await page.evaluate(() => harness.translations), [japanese]);
+    await page.selectOption('#engine','local');
+    await page.selectOption('#source','en');
+    await page.evaluate(() => {
+      QingReadLocal.translator = source => ({
+        translate:async text => {harness.mixedLocal={source,text};return '權限僅設為讀取。';},
+        destroy() {}
+      });
+    });
+    const mixed = '權限只把 package 設成 Read';
+    await page.locator('#text-input').fill(mixed);
+    await page.locator('#text-start').click();
+    await page.waitForFunction(() => document.querySelector('#text-status').textContent.includes('翻譯完成'));
+    assert.deepEqual(await page.evaluate(() => harness.mixedLocal), {source:'en',text:mixed});
+  } finally { await page.close(); }
+});
+
 test('text tab rejects empty or oversized input before creating an engine and keeps every chunk of long text',async()=>{
   const page=await panelFixture();
   try {
@@ -1886,6 +2308,33 @@ test('workspace remembers an approved connection only when opted in and can forg
  }finally{await page.close();}
 });
 
+test('a failed background commit keeps the caption owner alive and leaves the panel open',async()=>{
+ const page=await panelFixture();
+ try{
+  await page.evaluate(()=>{
+   chrome.tabs.query=async()=>[{id:7,windowId:3,url:'https://article.test/'}];
+   chrome.tabs.sendMessage=async(id,message)=>{harness.messages.push(message);return message.type==='qingread:media-read'?{text:'Keep the backup.',version:1,timelineVersion:1}:{ok:true};};
+   harness.remoteCalls=[];
+   chrome.runtime={sendMessage:async message=>{
+    harness.remoteCalls.push(message.action);
+    if(message.action==='prepare')return {ready:true};
+    if(message.action==='commit')return new Promise(resolve=>{harness.finishCommit=resolve;});
+    return {active:false};
+   }};
+  });
+  await page.locator('[data-view=video]').click();await page.locator('#video-start').click();
+  await page.waitForFunction(()=>!document.querySelector('#video-collapse').disabled);
+  await page.locator('#video-collapse').click();await page.waitForFunction(()=>Boolean(harness.finishCommit));
+  assert.equal(await page.evaluate(()=>harness.destroyed),0);
+  assert.equal(await page.evaluate(()=>harness.messages.some(message=>message.type==='qingread:media-stop')),false);
+  await page.evaluate(()=>harness.finishCommit({error:'背景計時器無法啟動。'}));
+  await page.waitForFunction(()=>document.querySelector('#video-background-status').textContent.includes('背景計時器'));
+  assert.equal(await page.evaluate(()=>harness.destroyed),0);
+  assert.equal(await page.evaluate(()=>harness.remoteCalls.includes('collapse')),false);
+  assert.equal(await page.locator('#video-stop').isEnabled(),true);
+  await page.locator('#video-stop').click();
+ }finally{await page.close();}
+});
 for(const outcome of ['success','failed','cancelled'])test(`caption collapse handoff ${outcome} preserves ownership and never closes before readiness`,async()=>{
  const page=await panelFixture();try{
   await page.evaluate(()=>{
@@ -1911,6 +2360,7 @@ for(const outcome of ['success','failed','cancelled'])test(`caption collapse han
   if(outcome==='success'){
    await page.waitForFunction(()=>harness.remoteCalls.includes('collapse'));
    assert.equal(await page.evaluate(()=>harness.destroyed),1);
+   assert.equal(await page.evaluate(()=>harness.messages.some(message=>message.type==='qingread:media-stop')),false);
    await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('pagehide'));});
    assert.equal(await page.evaluate(()=>harness.remoteCalls.includes('stop')),false);
    assert.equal(await page.evaluate(()=>harness.remoteCalls.filter(x=>x==='commit').length),1);

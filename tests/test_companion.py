@@ -83,12 +83,13 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(job['outputs'],[])
 
     def test_cancelled_queued_resource_download_never_starts(self):
-        job,directory=self.app.new_job('speech')
-        job['cancel'].set()
-        with patch.object(self.app,'new_job',return_value=(job,directory)), patch('app.threading.Thread',side_effect=lambda target,**kw:SimpleNamespace(start=target)), patch('app.subprocess.Popen') as process:
-            self.app.start_prepare('speech')
-            self.assertEqual(process.call_count,0)
-        self.assertEqual(job['state'],'cancelled')
+        with patch('app.threading.Thread') as thread, patch('app.subprocess.Popen') as process:
+            job = self.app.start_prepare('speech')
+            self.assertTrue(self.app.delete_job(job['id'])['cancelling'])
+            worker = thread.call_args.kwargs
+            worker['target'](*worker['args'])
+            process.assert_not_called()
+        self.assertEqual(self.app.get_job(job['id'])['state'], 'cancelled')
     def test_local_model_and_traditional_output(self):
         self.assertEqual(self.app.models(), ['local:small'])
         self.assertEqual(self.app.translate('Software and video')['text'], '軟體與影片')

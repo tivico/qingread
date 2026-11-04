@@ -40,3 +40,54 @@ test('speech overlap removes only a recent contiguous matching word prefix near 
   assert.equal(trimOverlap('Thank you','Thank you again',options),'Thank you again');
   assert.equal(trimOverlap('Whole previous sentence','Unrelated new speech',options),'Unrelated new speech');
 });
+
+function busyPipeline(request){
+ let now=0;const stopped=[],shown=[],bodies=[];
+ const s={controller:new AbortController(),source:'en',mode:'speech',speechQueue:createLatestBuffer(),dropped:0,glossary:[],cache:new Map(),translator:{translate:async()=> '譯文'}};
+ let current=s,state={paused:false,time:4.5,timelineVersion:1};
+ const stop=message=>{stopped.push(message);current=null;s.controller.abort();s.speechQueue.clear();};
+ const context={Float32Array,ArrayBuffer,DataView,Promise,Date:{now:()=>now},performance:{now:()=>now},
+  QingReadCore:require('../extension/core.js'),QingReadSpeech:{POLICY,createLatestBuffer,trimOverlap},
+  QingReadLocal:{request:async(_path,options)=>{bodies.push(options.body);return request(bodies.length);}}};
+ vm.runInNewContext(fs.readFileSync(path.resolve(__dirname,'../extension/video-pipeline.js'),'utf8'),context);
+ const pipeline=context.QingReadVideoPipeline.create({getSession:()=>current,stop,say(){},waitForEngine:p=>p,
+  send:async(_target,message)=>{if(message.type==='qingread:media-show'){shown.push(message);return {applied:true};}return {...state};}});
+ const flush=()=>new Promise(r=>setImmediate(r));
+ return {s,stopped,shown,bodies,stop,
+  async emit(sequence){state.time=4.5+sequence*4;await pipeline.speech(s,{samples:new Float32Array(72000).fill((sequence+1)/10),epoch:s.speechAudioEpoch||0,sequence,overlapMs:0});await flush();},
+  async tick(ms){now+=ms;await pipeline.watchSpeech(s);await flush();},
+  async seek(){state.timelineVersion++;await pipeline.watchSpeech(s);await flush();}
+ };
+}
+const speechBusy=()=>Object.assign(new Error('上一段語音還在辨識'),{code:'SPEECH_BUSY',status:429});
+
+test('busy speech waits before retrying and preserves a newer frame that arrived during the failed request',async()=>{
+ let reject;const h=busyPipeline(count=>count===1?new Promise((_resolve,r)=>reject=r):{text:'Latest speech',segments:[]});
+ await h.emit(0);await h.emit(1);reject(speechBusy());await h.tick(0);
+ assert.equal(h.stopped.length,0);assert.equal(h.bodies.length,1);
+ await h.tick(POLICY.busyRetryMs-1);assert.equal(h.bodies.length,1);
+ await h.tick(1);assert.equal(h.bodies.length,2);assert.equal(h.shown.length,1);
+ assert.equal(new DataView(h.bodies[1]).getInt16(44,true),Math.round(.2*32767));
+ assert.equal(h.s.speechBusySince,undefined);assert.equal(h.s.dropped,1);
+});
+
+test('persistent speech busy has a finite wait budget and never spins requests',async()=>{
+ const h=busyPipeline(()=>{throw speechBusy();});await h.emit(0);
+ for(let elapsed=0;elapsed<POLICY.busyTimeoutMs;elapsed+=POLICY.busyRetryMs)await h.tick(POLICY.busyRetryMs);
+ assert.equal(h.stopped.length,1);assert.match(h.stopped[0],/持續忙碌/);
+ assert.ok(h.bodies.length<=POLICY.busyTimeoutMs/POLICY.busyRetryMs);
+ assert.equal(h.shown.length,0);
+});
+
+test('stop and seek discard busy speech retries rather than replaying old audio',async()=>{
+ for(const action of ['stop','seek']){
+  const h=busyPipeline(()=>{throw speechBusy();});await h.emit(0);
+  if(action==='stop')h.stop('Stopped');else await h.seek();
+  await h.tick(POLICY.busyRetryMs);assert.equal(h.bodies.length,1);assert.equal(h.shown.length,0);
+ }
+});
+
+test('unrelated speech errors still stop immediately instead of being retried',async()=>{
+ const h=busyPipeline(()=>{throw Object.assign(new Error('請重新配對'),{status:401,code:'AUTH'});});
+ await h.emit(0);assert.deepEqual(h.stopped,['請重新配對']);assert.equal(h.bodies.length,1);
+});
