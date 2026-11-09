@@ -4,8 +4,8 @@
   "private": true,
   "description": "Local-first Chrome bilingual reading extension",
   "scripts": {
-    "test": "node --test tests/core.test.cjs tests/local-client.test.cjs tests/caption-state.test.cjs tests/speech-state.test.cjs tests/video-background.test.cjs",
-    "test:browser": "node --test tests/browser.test.cjs tests/video-comfort.test.cjs tests/long-page.test.cjs",
+    "test": "node --test tests/core.test.cjs tests/local-client.test.cjs tests/caption-state.test.cjs tests/speech-state.test.cjs tests/video-background.test.cjs tests/video-summary-core.test.cjs",
+    "test:browser": "node --test tests/browser.test.cjs tests/video-comfort.test.cjs tests/long-page.test.cjs tests/video-summary-browser.test.cjs",
     "test:extension": "node tests/extension-smoke.cjs"
   },
   "devDependencies": {

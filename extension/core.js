@@ -25,6 +25,14 @@
     const patterns = [...mapping.keys()].sort((a,b) => b.length-a.length).map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     return text.replace(new RegExp(patterns.join('|'), 'gu'), term => mapping.get(term));
   }
+  function translationWarnings(source, output, language) {
+    const warnings=[];
+    if(language==='ja' && /[\u3040-\u30ff]/u.test(output))warnings.push('譯文仍含日文，請核對是否有原文未翻或必須保留的專名。');
+    const words=source.match(/\p{L}{2,}/gu)||[];
+    if(source.length>=40 && words.length>=4 && !/\p{Script=Han}/u.test(output) &&
+       (output.match(/\p{L}{2,}/gu)||[]).length>=4)warnings.push('譯文沒有中文字，可能未翻成繁中；純代碼與專名可能不需翻譯，請對照原文。');
+    return warnings;
+  }
   function splitText(text, limit = LIMITS.chunk) {
     if (!Number.isInteger(limit) || limit < 2) throw new Error('Invalid chunk size');
     const points = Array.from(text);
@@ -93,7 +101,7 @@
       case 'ExtensionLoadError': return '清讀的讀取程式未能載入。請重新載入外掛並重新整理網頁，確認外掛資料夾完整。';
       case 'PageChangedError': return '頁面正在切換或已重新載入。請等頁面穩定後再開始。';
       case 'PageInjectionError': return '讀取程式未能啟動，原因尚未確認；這不一定是網站權限問題。';
-      case 'PageAccessError': return '無法讀取這個分頁。Chrome 尚未允許存取，或此頁面禁止外掛讀取。';
+      case 'PageAccessError': return '需要先允許清讀讀取這個網站，才能開始翻譯。請使用下方網站授權入口。';
       case 'PageMissingError': return '找不到目前分頁。請先開啟要翻譯的網頁。';
       case 'PageRestrictedError': return '這類分頁不能翻譯。請開啟一般網站，Chrome 設定頁等內部頁面不支援。';
       case 'PageReadError': return '沒有收到網頁回應。請重新整理網頁並重開清讀，再試一次。';
@@ -106,6 +114,6 @@
       default: return '本次操作未完成。請查看下方失敗步驟，再決定如何重試。';
     }
   }
-  root.QingReadCore = Object.freeze({ LIMITS, LANGUAGES, TERMS, localize, splitText, translateWebItem, errorText, injectionErrorName, parseGlossary, applyGlossary });
+  root.QingReadCore = Object.freeze({ LIMITS, LANGUAGES, TERMS, localize, splitText, translateWebItem, errorText, injectionErrorName, parseGlossary, applyGlossary, translationWarnings });
   if (typeof module !== 'undefined') module.exports = root.QingReadCore;
 })(globalThis);

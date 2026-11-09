@@ -6,7 +6,7 @@
   const settings = () => JSON.stringify([el('source').value,el('engine').value,el('terms').checked,glossaryRules]);
   const preservesChinese = input => el('engine').value === 'chrome' &&
     ['en','de','fr','es'].includes(el('source').value) && /\p{Script=Han}/u.test(input);
-  let outputComplete = false, outputRevision = 0;
+  let outputComplete = false, outputRevision = 0, outputWarnings=[];
   function count() {
     const input = el('text-input').value;
     el('text-count').textContent = `${input.length.toLocaleString()} / 6,000 字元`;
@@ -14,7 +14,7 @@
       ? `Chrome 語言包，${LANGUAGES[el('source').value]} → 繁體中文。中文會保留，外文分段翻譯。請確認專有名詞與權限名稱。`
       : `目前使用${el('engine').value === 'chrome' ? ' Chrome 語言包' : '本機模型'}，${LANGUAGES[el('source').value]} → 繁體中文。`;
   }
-  function invalidate() { retry=null;el('text-retry').hidden=true;outputComplete = false; outputRevision++; el('text-output').value = ''; el('text-copy').disabled = true; count(); }
+  function invalidate() { retry=null;el('text-retry').hidden=true;outputComplete = false;outputWarnings=[]; outputRevision++; el('text-output').value = ''; el('text-copy').disabled = true; count(); }
   function stop() { active?.controller.abort(); }
   el('text-input').addEventListener('input', () => { invalidate(); el('text-status').textContent = '原文已變更，請重新翻譯。'; });
   el('text-clear').onclick = () => {
@@ -39,6 +39,7 @@
       : [{text,translate:true}]);
     const hasForeignText = chunks.some(parts => parts.some(part => part.translate));
     const outputs = saved ? [...saved.outputs] : [];
+    const warnings = new Set(saved?.warnings || []);
     const separator = preserveChinese ? '' : '\n';
     const job = {id:crypto.randomUUID(),kind:'text',controller:new AbortController(),translator:null,resumeIdentity:saved?.identity,
       report: message => { if (active === job && !job.controller.signal.aborted) el('text-status').textContent = message + (outputs.length && !outputComplete && !message.includes('尚未完整') ? ` 已完成 ${outputs.length} / ${chunks.length} 段，尚未完整。` : ''); }};
@@ -47,7 +48,7 @@
     active = running = job; controls(true);
     el('text-input').readOnly = true; el('text-stop').disabled = false; invalidate();
     el('text-retry').disabled=true;
-    if(outputs.length){el('text-output').value=outputs.join(separator);el('text-copy').disabled=false;}
+    if(outputs.length){el('text-output').value=outputs.join(separator);el('text-copy').disabled=false;outputWarnings=[...warnings];}
     job.report(hasForeignText ? '正在準備翻譯引擎…' : '正在保留中文原文…');
     try {
       // Preserve click activation for Chrome's model preparation.
@@ -71,13 +72,15 @@
         }
         assertLive(job);
         outputs.push(parts.join(''));
+        for(const warning of QingReadCore.translationWarnings(chunk.map(part=>part.text).join(''),parts.join(''),el('source').value))warnings.add(warning);
+        outputWarnings=[...warnings];
         // Only publish complete chunks; never present token fragments as finished text.
         el('text-output').value = outputs.join(separator);
         outputRevision++;
         el('text-copy').disabled = false;
       }
       outputComplete = true;
-      job.report(!hasForeignText ? '原文已是中文，已保留原文。' : preserveChinese
+      job.report(warnings.size ? '處理結束，譯文需要核對。' + [...warnings].join(' ') : !hasForeignText ? '原文已是中文，已保留原文。' : preserveChinese
         ? '處理完成。中文已保留，外文已分段翻譯。請確認專有名詞與權限名稱。'
         : '翻譯完成。可複製譯文，或修改原文後再翻一次。');
     } catch (error) {
@@ -86,10 +89,10 @@
         const reason = error.name === 'AbortError' ? '已停止。' : failure(error);
         el('text-status').textContent = reason + (outputs.length
           ? ` 已保留 ${outputs.length} / ${chunks.length} 段譯文，尚未完整；可先複製。`
-          : ' 本次未產生完整譯文。');
+          : ' 本次未產生完整譯文。') + (warnings.size?' 已顯示譯文仍需核對：'+[...warnings].join(' '):'');
         if(outputs.length && outputs.length<chunks.length && error.code!=='MODEL_CHANGED' &&
             (el('engine').value!=='local' || job.translator?.identity)) {
-          retry={input,settings:snapshot,outputs:[...outputs],identity:job.translator?.identity};
+          retry={input,settings:snapshot,outputs:[...outputs],warnings:[...warnings],identity:job.translator?.identity};
           el('text-retry').hidden=false;
         }
       }
@@ -118,8 +121,8 @@
     const revision = outputRevision;
     try {
       await navigator.clipboard.writeText(output);
-      if (revision === outputRevision) el('text-status').textContent = outputComplete ? '已複製譯文。' : '已複製部分譯文；內容尚未完整。';
+      if (revision === outputRevision) el('text-status').textContent = (outputComplete ? '已複製譯文。' : '已複製部分譯文；內容尚未完整。') + (outputWarnings.length?' 譯文仍需核對：'+outputWarnings.join(' '):'');
     }
-    catch { if (revision === outputRevision) el('text-status').textContent = '無法自動複製，請反白譯文手動複製。' + (outputComplete ? '' : '目前內容尚未完整。'); }
+    catch { if (revision === outputRevision) el('text-status').textContent = '無法自動複製，請反白譯文手動複製。' + (outputComplete ? '' : '目前內容尚未完整。') + (outputWarnings.length?' 譯文仍需核對：'+outputWarnings.join(' '):''); }
   };
 })();

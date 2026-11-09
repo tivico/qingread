@@ -65,12 +65,16 @@ class PackageTest(unittest.TestCase):
             if name == names[0]:
                 self.assertIn('manifest.json', files)
                 self.assertIn('video-offscreen.js', files)
+                for module in ('transcript-content.js', 'video-summary-core.js', 'video-summary.js'):
+                    self.assertIn(module, files)
                 self.assertIn('INSTALL.txt', files)
                 self.assertNotIn('private.json', files)
                 self.assertEqual(json.loads(files['manifest.json'])['version'], self.version)
             else:
                 for required in ('docs/PROGRESS.md', 'CHANGELOG.md', 'README.md', '.gitignore',
                                  'companion/install.cmd', 'companion/start.cmd',
+                                 'companion/launcher.py', 'companion/runtime_status.py',
+                                 'tests/fixtures/translation-quality.json',
                                  'companion/licenses/BabelDOC-AGPL-3.0.txt',
                                  'tests/fixtures/youtube-caption-timing.json', 'scripts/package.ps1'):
                     self.assertIn(required, files)

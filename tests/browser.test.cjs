@@ -691,7 +691,7 @@ async function panelFixture(mode = 'normal') {
         onRemoved: { addListener: fn => { const previous=state.onRemoved; state.onRemoved=(...args)=>{previous?.(...args);fn(...args);}; } },
         sendMessage: async (id, message, options) => {
           if (message.type === 'qingread:display' && message.translationOnly === undefined) return {translationOnly:false};
-          state.messages.push({ id, ...message, documentId: options.documentId });
+          state.messages.push({ id, ...message, tabId:id, documentId: options.documentId });
           if (message.type.endsWith('collect') || message.type === 'qingread:summary-source') return { items, limited: false };
           if (message.type.endsWith('restore')) return { restored: true };
           return { applied: true };
@@ -904,6 +904,65 @@ test('panel creates engine from user click, targets exact document, applies term
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('已還原'));
   } finally { await page.close(); }
 });
+test('restoring a page holds translation controls until the original document acknowledges', async () => {
+  const page = await panelFixture();
+  try {
+    await page.evaluate(() => {
+      const send=chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage=(id,message,options)=>message.type==='qingread:restore'
+        ? new Promise(resolve=>{harness.finishRestore=()=>resolve({restored:true});}) : send(id,message,options);
+    });
+    await page.locator('#restore').click();
+    await page.waitForFunction(()=>Boolean(harness.finishRestore));
+    assert.equal(await page.locator('#start').isDisabled(),true);
+    assert.equal(await page.locator('#text-start').isDisabled(),true);
+    await page.evaluate(()=>document.querySelector('#start').click());
+    assert.equal(await page.evaluate(()=>harness.created),0);
+    await page.evaluate(()=>harness.finishRestore());
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('已還原目前網頁'));
+    assert.equal(await page.locator('#start').isEnabled(),true);
+  } finally { await page.close(); }
+});
+
+test('stopping a restore during injection never sends a late restore command', async () => {
+  const page = await panelFixture();
+  try {
+    await page.evaluate(()=>{
+      chrome.scripting.executeScript=()=>new Promise(resolve=>{harness.finishInject=()=>resolve([{documentId:'doc-7'}]);});
+    });
+    await page.locator('#restore').click();
+    await page.waitForFunction(()=>Boolean(harness.finishInject));
+    assert.equal(await page.locator('#stop').isEnabled(),true);
+    await page.locator('#stop').click();
+    await page.evaluate(()=>harness.finishInject());
+    await page.waitForFunction(()=>!document.querySelector('#translation-only').disabled);
+    assert.equal(await page.evaluate(()=>harness.messages.some(m=>m.type==='qingread:restore')),false);
+    assert.doesNotMatch(await page.locator('#status').textContent(),/已還原目前網頁/);
+  } finally { await page.close(); }
+});
+
+for (const failed of [false,true]) test(`a late restore ${failed?'failure':'success'} cannot overwrite translation on a newly selected tab`, async () => {
+  const page = await panelFixture('pending');
+  try {
+    await page.evaluate(failed=>{
+      const send=chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage=(id,message,options)=>message.type==='qingread:restore'
+        ? new Promise((resolve,reject)=>{harness.finishRestore=()=>failed?reject(new Error('Old page closed')):resolve({restored:true});}) : send(id,message,options);
+    },failed);
+    await page.locator('#restore').click();
+    await page.waitForFunction(()=>Boolean(harness.finishRestore));
+    await page.evaluate(()=>{harness.currentTab=8;harness.onActivated({tabId:8});});
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>harness.translations.length===1);
+    const status=await page.locator('#status').textContent();
+    await page.evaluate(async()=>{harness.finishRestore();await new Promise(resolve=>setTimeout(resolve,0));});
+    assert.equal(await page.locator('#status').textContent(),status);
+    assert.equal(await page.locator('#start').isDisabled(),true);
+    assert.equal(await page.locator('#restore').isDisabled(),true);
+    await page.locator('#stop').click();
+  } finally { await page.close(); }
+});
+
 test('the web display checkbox switches only the active document without starting translation', async () => {
   const page = await panelFixture();
   try {
@@ -966,6 +1025,41 @@ test('first translation failure reports error instead of completed zero paragrap
   }finally{await page.close();}
 });
 
+test('web translation recovers a dropped status read and reports retained paragraphs on later failure', async () => {
+  const page = await panelFixture();
+  try {
+    await page.evaluate(() => {
+      chrome.storage.session = {get: async () => ({companionToken:'a'.repeat(43)})};
+      harness.posts = [];
+      harness.polls = [];
+      fetch = async (url, {method}) => {
+        if (url.endsWith('/health')) return new Response('{"inference_jobs":true,"inference_client_identity":true}');
+        if (method === 'POST') {
+          harness.posts.push(url);
+          return new Response(harness.posts.length === 1 ? '{"stage":"generating"}' : '{"stage":"failed","error":"TIMEOUT"}');
+        }
+        if (method === 'GET') {
+          harness.polls.push(url);
+          if (harness.polls.length === 1) throw new TypeError('connection dropped');
+          return new Response('{"stage":"done","text":"第一段譯文。"}');
+        }
+        throw new Error('Unexpected assistant request');
+      };
+    });
+    await page.selectOption('#engine', 'local');
+    await page.locator('#start').click();
+    await page.waitForFunction(() => document.querySelector('#status').textContent.includes('正在重新查詢'));
+    await page.waitForFunction(() => document.querySelector('#detail').textContent.includes('中斷前已顯示 1 段譯文'));
+    const state = await page.evaluate(() => harness);
+    assert.equal(state.posts.length, 2);
+    assert.equal(new Set(state.posts).size, 2);
+    assert.deepEqual(state.polls, [state.posts[0], state.posts[0]]);
+    assert.deepEqual(state.messages.filter(m => m.type === 'qingread:apply').map(m => m.text), ['第一段譯文。']);
+    assert.match(await page.locator('#detail').textContent(), /回到原分頁再按開始/);
+    assert.equal(await page.locator('#start').isEnabled(), true);
+  } finally { await page.close(); }
+});
+
 test('engine test translates built-in text without collecting or injecting a webpage',async()=>{
   const page=await panelFixture();
   try{
@@ -986,7 +1080,7 @@ test('missing page permission is reported without waiting for engine download',a
       chrome.scripting.executeScript=async()=>{throw new Error('Cannot access contents');};
     });
     await page.locator('#start').click();
-    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('無法讀取這個分頁'));
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('需要先允許清讀讀取這個網站'));
     await page.evaluate(()=>harness.resolveEngine());
     await page.waitForFunction(()=>harness.destroyed===1);
     assert.equal(await page.locator('#start').isEnabled(),true);
@@ -1066,6 +1160,7 @@ for(const kind of ['web','video'])for(const event of ['url','removed'])test(`${k
     const start=kind==='web'?'#start':'#video-start',stop=kind==='web'?'#stop':'#video-stop';
     if(kind==='video')await page.locator('[data-view=video]').click();
     await page.locator(start).click();await page.waitForFunction(()=>harness.translations.length===1);
+    if(kind==='web')await page.evaluate(()=>{harness.currentTab=8;harness.onActivated({tabId:8});});
     const emit=(id,event)=>page.evaluate(({id,event})=>event==='url'?harness.onUpdated(id,{url:'https://article.test/next'}):harness.onRemoved(id),{id,event});
     await emit(99,event);assert.equal(await page.locator(stop).isEnabled(),true);
     await emit(7,event);
@@ -1077,16 +1172,85 @@ for(const kind of ['web','video'])for(const event of ['url','removed'])test(`${k
   }finally{await page.close();}
 });
 
-test('switching tabs cancels translation without applying to another tab', async () => {
+test('switching tabs keeps translation on the original document until completion', async () => {
   const page = await panelFixture('pending');
   try {
     await page.locator('#start').click();
     await page.waitForFunction(() => harness.translations.length === 1);
     await page.evaluate(() => { harness.currentTab = 8; harness.onActivated({ tabId: 8 }); });
-    await page.waitForFunction(() => document.querySelector('#status').textContent.includes('已切換分頁'));
-    const messages = await page.evaluate(() => harness.messages);
-    assert.equal(messages.filter(m => m.type.endsWith('apply')).length, 0);
+    assert.equal(await page.locator('#stop').isEnabled(),true);
+    await page.evaluate(()=>harness.release());
+    await page.waitForFunction(()=>harness.translations.length===2);
+    await page.evaluate(()=>harness.release());
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('完成 2 段'));
+    const writes=await page.evaluate(()=>harness.messages.filter(m=>m.type==='qingread:apply'));
+    assert.equal(writes.length,2);
+    assert.ok(writes.every(m=>m.tabId===7 && m.documentId==='doc-7'));
+    assert.match(await page.locator('#detail').textContent(),/翻譯來源：article\.test/);
   } finally { await page.close(); }
+});
+test('switching tabs before the source document is bound prevents late extraction',async()=>{
+  const page=await panelFixture();try{
+    await page.evaluate(()=>{chrome.scripting.executeScript=()=>new Promise(resolve=>{harness.finishInjection=()=>resolve([{documentId:'doc-7'}]);});});
+    await page.locator('#start').click();await page.waitForFunction(()=>Boolean(harness.finishInjection));
+    await page.evaluate(()=>{harness.currentTab=8;harness.onActivated({tabId:8});harness.finishInjection();});
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('已切換分頁'));
+    assert.equal(await page.evaluate(()=>harness.messages.some(m=>m.type==='qingread:collect')),false);
+  }finally{await page.close();}
+});
+test('the source document refuses translation from its previous address before the browser reports navigation',async()=>{
+  const page=await fixture();try{
+    const result=await page.evaluate(async()=>{
+      const original=location.href;
+      const batch=await message({type:'qingread:collect',job:'original',scope:'page',sourceUrl:original});
+      history.pushState({},'', '/next');
+      const order=await message({type:'qingread:prioritize',job:'original'});
+      const apply=await message({type:'qingread:apply',job:'original',id:batch.items[0].id,text:'不應顯示'});
+      const staleRead=await message({type:'qingread:collect',job:'late',scope:'page',sourceUrl:original});
+      const fresh=await message({type:'qingread:collect',job:'fresh',scope:'page',sourceUrl:location.href});
+      return {order,apply,staleRead,freshCount:fresh.items.length};
+    });
+    for(const value of [result.order,result.apply,result.staleRead])assert.deepEqual(value,{error:'changed'});
+    assert.ok(result.freshCount>0);
+    assert.equal(await page.locator('[data-qingread="translation"]').count(),0);
+  }finally{await page.close();}
+});
+test('webpage translation continues while the panel is hidden by an app switch', async () => {
+  const page = await panelFixture('pending');
+  try {
+    await page.locator('#start').click();
+    await page.waitForFunction(() => harness.translations.length === 1);
+    await page.evaluate(() => {
+      Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    assert.equal(await page.locator('#stop').isEnabled(),true);
+    await page.evaluate(()=>harness.release());
+    await page.waitForFunction(()=>harness.translations.length===2);
+    await page.evaluate(()=>harness.release());
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('完成 2 段'));
+    const messages=await page.evaluate(()=>harness.messages);
+    const writes=messages.filter(m=>m.type==='qingread:apply');
+    assert.equal(writes.length,2);
+    assert.ok(writes.every(m=>m.documentId==='doc-7'));
+    assert.equal(messages.some(m=>m.type==='qingread:cancel'),false);
+  } finally { await page.close(); }
+});
+test('closing a hidden panel still cancels webpage translation and rejects a late result', async () => {
+  const page=await panelFixture('pending');
+  try {
+    await page.locator('#start').click();await page.waitForFunction(()=>harness.translations.length===1);
+    await page.evaluate(()=>{
+      Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    assert.equal(await page.locator('#stop').isEnabled(),true);
+    await page.evaluate(()=>{window.dispatchEvent(new Event('pagehide'));harness.release();});
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('側邊欄已關閉'));
+    const messages=await page.evaluate(()=>harness.messages);
+    assert.ok(messages.some(m=>m.type==='qingread:cancel'&&m.documentId==='doc-7'));
+    assert.equal(messages.some(m=>m.type==='qingread:apply'),false);
+  }finally{await page.close();}
 });
 test('cancelled jobs cannot insert results and later collection includes dynamic content', async () => {
   const page = await fixture();
@@ -1197,6 +1361,135 @@ test('companion client uses fixed loopback, omits credentials and stores pairing
     });
     assert.equal(result.failed,true);assert.equal(result.saved.companionToken,'a'.repeat(43));
     assert.ok(result.requests.every(r=>r.url.startsWith('http://127.0.0.1:8765/')&&r.credentials==='omit'&&r.redirect==='error'));
+  }finally{await page.close();}
+});
+
+async function readinessWorkspace() {
+  const page=await browser.newPage({viewport:{width:390,height:844}});
+  await page.route('https://readiness.test/**',route=>{
+    const name=new URL(route.request().url()).pathname.slice(1)||'workspace.html';
+    return route.fulfill({body:fs.readFileSync(path.join(extension,name)),contentType:name.endsWith('.svg')?'image/svg+xml':name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});
+  });
+  await page.addInitScript(()=>{
+    globalThis.readyHarness={offline:false,uploads:0,health:{version:'0.3.9',models:['local:test'],selected_model:'',
+      ollama:true,pdf_installed:true,pdf_assets_ready:false,speech_ready:false,pdf_preview:true,
+      runtime:{revision:'a'.repeat(64),updateRequired:false}}};
+    globalThis.chrome={storage:{session:{get:async()=>({companionToken:'a'.repeat(43)}),remove:async()=>{}},
+      local:{get:async()=>({}),remove:async()=>{}}}};
+    globalThis.fetch=async(url,options)=>{
+      if(readyHarness.offline)throw new Error('connection refused');
+      if(url.includes('/pdf?'))readyHarness.uploads++;
+      if(url.endsWith('/settings'))readyHarness.health.selected_model=JSON.parse(options.body).model;
+      return {ok:true,json:async()=>url.endsWith('/health')?readyHarness.health:{jobs:[]}};
+    };
+  });
+  await page.goto('https://readiness.test/workspace.html');
+  await page.waitForFunction(()=>document.querySelector('#health').textContent.includes('已連線'));
+  return page;
+}
+
+test('readiness explains missing selected model and optional resources; saving a model refreshes it',async()=>{
+  const page=await readinessWorkspace();
+  try{
+    assert.match(await page.locator('#setup-checks').textContent(),/待處理 · 文字翻譯與摘要/);
+    assert.match(await page.locator('#setup-checks').textContent(),/下載 PDF 排版資源/);
+    await page.locator('#save-model').click();
+    await page.waitForFunction(()=>document.querySelector('#setup-checks').textContent.includes('已就緒 · 文字翻譯與摘要'));
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.screenshot({path:path.join(__dirname,'../test-results/readiness-mobile.png'),fullPage:true});
+  }finally{await page.close();}
+});
+
+test('same-version stale helper disables document uploads and recovers after update recheck',async()=>{
+  const page=await readinessWorkspace();
+  try{
+    await page.evaluate(()=>{readyHarness.health.runtime.updateRequired=true;});
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('#health').textContent.includes('尚未載入更新'));
+    for(const id of ['translate-pdf','preview-pdf','prepare-pdf','prepare-speech','save-model']){
+      assert.equal(await page.locator('#'+id).isDisabled(),true,id);
+    }
+    await page.evaluate(()=>document.querySelector('#translate-pdf').onclick());
+    await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('文件未送出'));
+    assert.equal(await page.evaluate(()=>readyHarness.uploads),0);
+    await page.evaluate(()=>{readyHarness.health.runtime.updateRequired=false;});
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>!document.querySelector('#translate-pdf').disabled);
+  }finally{await page.close();}
+});
+
+test('connection recheck clears obsolete success and model choices after disconnection',async()=>{
+  const page=await readinessWorkspace();
+  try{
+    await page.evaluate(()=>{readyHarness.offline=true;});
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('#health').textContent.includes('尚未確認'));
+    assert.equal(await page.locator('#model option').count(),0);
+    assert.match(await page.locator('#setup-checks').textContent(),/start.cmd/);
+    assert.doesNotMatch(await page.locator('#health').textContent(),/已連線/);
+  }finally{await page.close();}
+});
+
+test('untranslated foreign prose is preserved for review and its warning survives copying',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      Translator.create=async()=>({destroy(){},translate:async text=>text});
+      Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async()=>{}}});
+    });
+    await page.locator('#source').selectOption('es');
+    await page.locator('[data-view=text]').click();
+    const source='El resumen incluye solo el texto visible de la página, hasta 6000 caracteres.';
+    await page.locator('#text-input').fill(source);
+    await page.locator('#text-start').click();
+    await page.waitForFunction(()=>document.querySelector('#text-status').textContent.includes('需要核對'));
+    assert.equal(await page.locator('#text-output').inputValue(),source);
+    await page.locator('#text-copy').click();
+    await page.waitForFunction(()=>document.querySelector('#text-status').textContent.includes('已複製'));
+    assert.match(await page.locator('#text-status').textContent(),/仍需核對/);
+    await page.evaluate(()=>{navigator.clipboard.writeText=async()=>{throw new Error('clipboard blocked');};});
+    await page.locator('#text-copy').click();
+    await page.waitForFunction(()=>document.querySelector('#text-status').textContent.includes('無法自動複製'));
+    assert.match(await page.locator('#text-status').textContent(),/仍需核對/);
+    await page.evaluate(source=>{
+      const send=chrome.tabs.sendMessage;
+      chrome.tabs.sendMessage=(id,message,options)=>message.type==='qingread:collect'
+        ?Promise.resolve({items:[{id:'one',text:source}],limited:false})
+        :send(id,message,options);
+    },source);
+    await page.locator('[data-view=web]').click();
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('部分譯文需要核對'));
+    assert.match(await page.locator('#detail').textContent(),/沒有中文字/);
+  }finally{await page.close();}
+});
+
+test('partial text quality warning survives stopping and resuming later chunks',async()=>{
+  const page=await panelFixture();
+  try{
+    await page.evaluate(()=>{
+      harness.qualityCalls=0;
+      Translator.create=async()=>({destroy(){},translate(text,{signal}){
+        harness.qualityCalls++;
+        if(harness.qualityCalls===1)return Promise.resolve(text);
+        if(harness.resumeQuality)return Promise.resolve('已完成接續翻譯。');
+        harness.qualityWaiting=true;
+        return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new DOMException('Stopped','AbortError')),{once:true}));
+      }});
+    });
+    await page.locator('#source').selectOption('es');
+    await page.locator('[data-view=text]').click();
+    await page.locator('#text-input').fill('El resumen incluye solo el texto visible de la página, hasta 6000 caracteres. '.repeat(25));
+    await page.locator('#text-start').click();
+    await page.waitForFunction(()=>harness.qualityWaiting);
+    await page.locator('#text-stop').click();
+    await page.waitForFunction(()=>!document.querySelector('#text-retry').hidden);
+    assert.match(await page.locator('#text-status').textContent(),/尚未完整.*仍需核對/);
+    await page.evaluate(()=>{harness.resumeQuality=true;});
+    await page.locator('#text-retry').click();
+    await page.waitForFunction(()=>document.querySelector('#text-status').textContent.includes('處理結束'));
+    assert.match(await page.locator('#text-status').textContent(),/需要核對/);
+    assert.match(await page.locator('#text-output').inputValue(),/已完成接續翻譯/);
   }finally{await page.close();}
 });
 
@@ -1974,6 +2267,135 @@ test('text tab with local engine posts only the pasted text and shows companion 
 });
 
 
+async function netDocumentsPermissionFixture(page) {
+  await page.evaluate(()=>{
+    const execute=chrome.scripting.executeScript;
+    harness.articleUrl='https://www.netdocuments.com/blog/inspire-2026-recap/';
+    harness.grants=[];harness.accessInjections=0;
+    chrome.tabs.query=async()=>[{id:7,windowId:10,...(harness.granted?{url:harness.articleUrl}:{})}];
+    chrome.scripting.executeScript=async options=>{
+      harness.accessInjections++;
+      if(!harness.granted)throw new Error('Cannot access contents of the page. Extension manifest must request permission to access the respective host.');
+      return execute(options);
+    };
+    chrome.permissions={contains:async()=>false,request:async options=>{
+      harness.grants.push(options);harness.siteGesture=navigator.userActivation.isActive;
+      harness.granted=harness.allowGrant!==false;return harness.granted;
+    }};
+  });
+}
+
+test('hidden-URL webpage grants the pasted NetDocuments host with a visible actionable fallback',async()=>{
+  const page=await panelFixture();
+  try{
+    await netDocumentsPermissionFixture(page);
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>!document.querySelector('#grant-site').hidden);
+    assert.equal(await page.locator('#site-entry').isVisible(),true);
+    await page.locator('#site-url').fill('https://www.netdocuments.com/blog/inspire-2026-recap/?private=not-saved');
+    assert.equal(await page.locator('#grant-site').textContent(),'允許 www.netdocuments.com');
+    await page.locator('#grant-site').click();
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('網站授權完成'));
+    assert.deepEqual(await page.evaluate(()=>harness.grants),[{origins:['https://www.netdocuments.com/*']}]);
+    assert.equal(await page.evaluate(()=>harness.siteGesture),true);
+    assert.equal(await page.locator('#site-entry').isVisible(),false);
+    assert.equal(await page.locator('#site-url').inputValue(),'');
+    assert.equal(await page.evaluate(()=>harness.translations.length),0);
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('完成 2'));
+  }finally{await page.close();}
+});
+
+test('webpage pasted access rejects credentials, rechecks source after grant and clears on navigation',async()=>{
+  const page=await panelFixture();
+  try{
+    await netDocumentsPermissionFixture(page);
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>!document.querySelector('#grant-site').hidden);
+    assert.equal(await page.locator('#site-entry').isVisible(),true);
+    await page.locator('#site-url').fill('https://user:secret@www.netdocuments.com/');
+    await page.locator('#grant-site').click();
+    assert.equal(await page.evaluate(()=>harness.grants.length),0);
+    assert.match(await page.locator('#detail').textContent(),/不接受含帳號密碼/);
+    await page.locator('#site-url').fill('https://www.netdocuments.com/');
+    await page.evaluate(()=>{harness.articleUrl='https://different.test/';});
+    await page.locator('#grant-site').click();
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('頁面正在切換'));
+    assert.equal(await page.evaluate(()=>harness.accessInjections),1);
+    assert.equal(await page.locator('#site-entry').isVisible(),false);
+    assert.equal(await page.locator('#site-url').inputValue(),'');
+  }finally{await page.close();}
+});
+
+test('all-site permission is requested only by its explicit settings click and never starts extraction',async()=>{
+  const page=await panelFixture();
+  try{
+    await netDocumentsPermissionFixture(page);
+    assert.equal(await page.locator('#all-sites-grant').count(),1);
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>!document.querySelector('#grant-site').hidden);
+    assert.equal(await page.evaluate(()=>harness.grants.length),0);
+    await page.locator('[data-view=settings]').click();
+    await page.locator('#all-sites-grant').click();
+    await page.waitForFunction(()=>document.querySelector('#all-sites-status').textContent.includes('已允許'));
+    assert.deepEqual(await page.evaluate(()=>harness.grants),[{origins:['https://*/*','http://*/*']}]);
+    assert.equal(await page.evaluate(()=>harness.siteGesture),true);
+    assert.equal(await page.evaluate(()=>harness.accessInjections),1);
+    assert.equal(await page.evaluate(()=>harness.translations.length),0);
+    await page.locator('[data-view=web]').click();await page.locator('#start').click();
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('完成 2'));
+  }finally{await page.close();}
+});
+
+test('denied all-site permission is not reported as granted and leaves per-site access available',async()=>{
+  const page=await panelFixture();
+  try{
+    await netDocumentsPermissionFixture(page);
+    await page.evaluate(()=>{harness.allowGrant=false;});
+    assert.equal(await page.locator('#all-sites-grant').count(),1);
+    await page.locator('[data-view=settings]').click();await page.locator('#all-sites-grant').click();
+    await page.waitForFunction(()=>document.querySelector('#all-sites-status').textContent.includes('尚未允許'));
+    assert.equal(await page.locator('#all-sites-grant').isEnabled(),true);
+    assert.equal(await page.evaluate(()=>harness.accessInjections),0);
+  }finally{await page.close();}
+});
+
+test('a late webpage grant cannot restore pasted access controls after a source tab change',async()=>{
+  const page=await panelFixture();
+  try{
+    await netDocumentsPermissionFixture(page);
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>!document.querySelector('#grant-site').hidden);
+    await page.locator('#site-url').fill('https://www.netdocuments.com/');
+    await page.evaluate(()=>{chrome.permissions.request=()=>new Promise(resolve=>{harness.finishGrant=resolve;});});
+    await page.locator('#grant-site').click();
+    await page.waitForFunction(()=>Boolean(harness.finishGrant));
+    await page.evaluate(()=>{
+      chrome.tabs.query=async()=>[{id:8,windowId:10,url:'https://different.test/'}];
+      harness.onActivated({tabId:8,windowId:10});harness.finishGrant(true);
+    });
+    await page.waitForFunction(()=>!document.querySelector('#grant-site').disabled);
+    assert.equal(await page.locator('#site-entry').isVisible(),false);
+    assert.equal(await page.locator('#grant-site').isVisible(),false);
+    assert.equal(await page.locator('#site-url').inputValue(),'');
+    assert.equal(await page.evaluate(()=>harness.accessInjections),1);
+  }finally{await page.close();}
+});
+
+test('website permission status reflects existing Chrome grants and later revocation without requesting access',async()=>{
+  const page=await panelFixture();
+  try{
+    await netDocumentsPermissionFixture(page);
+    await page.locator('[data-view=settings]').click();
+    await page.evaluate(async()=>{chrome.permissions.contains=async()=>true;await refreshAllSitesAccess();});
+    assert.equal(await page.locator('#all-sites-grant').isDisabled(),true);
+    assert.match(await page.locator('#all-sites-status').textContent(),/已允許/);
+    await page.evaluate(async()=>{chrome.permissions.contains=async()=>false;await refreshAllSitesAccess();});
+    assert.equal(await page.locator('#all-sites-grant').isEnabled(),true);
+    assert.equal(await page.evaluate(()=>harness.grants.length),0);
+  }finally{await page.close();}
+});
+
 test('summary offers its own permission action and keeps requests scoped to the failed page',async()=>{
  const page=await panelFixture();try{
   await page.evaluate(()=>{
@@ -2112,15 +2534,14 @@ test('activation in another window does not cancel this window webpage translati
  const page=await panelFixture();try{
   await page.evaluate(()=>{
    chrome.tabs.query=async()=>[{id:7,windowId:10,url:'https://article.test/'}];
-   Translator.create=async()=>({translate:()=>new Promise(resolve=>{harness.finishTranslation=()=>resolve('翻譯結果');}),destroy(){}});
+   Translator.create=async()=>({translate:()=>harness.finishTranslation ? Promise.resolve('翻譯結果') : new Promise(resolve=>{harness.finishTranslation=()=>resolve('翻譯結果');}),destroy(){}});
   });
   await page.locator('#start').click();await page.waitForFunction(()=>Boolean(harness.finishTranslation));
   await page.evaluate(()=>harness.onActivated({tabId:99,windowId:20}));
   assert.equal(await page.locator('#stop').isEnabled(),true);
-  await page.evaluate(()=>harness.onActivated({tabId:8,windowId:10}));
   await page.evaluate(()=>harness.finishTranslation());
-  await page.waitForFunction(()=>document.querySelector('#stop').disabled);
-  assert.equal(await page.evaluate(()=>harness.messages.some(m=>m.type==='qingread:apply')),false);
+  await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('完成 2 段'));
+  assert.equal(await page.evaluate(()=>harness.messages.filter(m=>m.type==='qingread:apply' && m.tabId===7).length),2);
  }finally{await page.close();}
 });
 

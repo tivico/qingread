@@ -58,6 +58,26 @@ class InferenceTest(unittest.TestCase):
             **({'profile':profile} if profile is not None else {})})
         return wait_for(lambda:self.app.inference_jobs.get(identifier, 'local'))
 
+    def test_video_summary_modes_validate_and_do_not_reuse_article_or_other_mode_cache(self):
+        self.parts = [{'message':{'content':'摘要結果'}, 'done':True}]
+        self.run_text('same source', kind='summarize')
+        for mode in ('video-chunk', 'video-overview'):
+            identifier = uuid.uuid4().hex
+            data = {'kind':'summarize', 'text':'same source', 'summaryMode':mode}
+            self.app.start_inference(identifier, 'local', data)
+            result = wait_for(lambda:self.app.inference_jobs.get(identifier, 'local'))
+            self.assertEqual(result['stage'], 'done')
+            self.assertFalse(result['cached'])
+            self.assertIn('不猜測時間戳記', self.calls[-1]['messages'][0]['content'])
+            field = '影片字幕片段' if mode == 'video-chunk' else '影片各段摘要'
+            self.assertIn(field, self.calls[-1]['messages'][1]['content'])
+            self.assertEqual(self.calls[-1]['options']['num_predict'], 512)
+        for kind, mode in [('translate','video-chunk'), ('summarize','bad'), ('summarize',{})]:
+            with self.assertRaises(UserError) as error:
+                self.app.start_inference(uuid.uuid4().hex, 'local', {'kind':kind,'text':'text','summaryMode':mode})
+            self.assertEqual(error.exception.code, 'SUMMARY_MODE')
+        self.assertTrue(self.app.health()['video_summary'])
+
     def test_video_profile_has_bounded_options_metrics_and_separate_cache(self):
         self.parts = [{'message':{'content':'影片譯文'}, 'done':True,
             'load_duration':20_000_000, 'prompt_eval_duration':30_000_000, 'eval_duration':40_000_000}]
@@ -66,7 +86,7 @@ class InferenceTest(unittest.TestCase):
         payload = self.calls[-1]
         self.assertEqual(json.loads(payload['messages'][1]['content'])['原文'], 'Keep the original file.')
         self.assertEqual(payload['keep_alive'], '10m')
-        self.assertEqual(payload['options'], {'temperature':0, 'num_ctx':4096, 'num_predict':256})
+        self.assertEqual(payload['options'], {'temperature':0, 'num_ctx':8192, 'num_predict':256})
         self.assertEqual(first['timings']['loadMs'], 20)
         self.assertEqual(first['timings']['promptMs'], 30)
         self.assertEqual(first['timings']['generationMs'], 40)
@@ -77,6 +97,37 @@ class InferenceTest(unittest.TestCase):
         general = self.run_text('Keep the original file.')
         self.assertFalse(general['cached'])
         self.assertEqual(self.calls[-1]['options']['num_ctx'], 8192)
+
+    def test_concise_video_summary_keeps_full_input_bounds_output_and_isolates_cache(self):
+        text = 'Keep the backup. ' * 250 + 'FINAL LIMIT: Do not delete the original.'
+        def run(mode, detail=None):
+            identifier = uuid.uuid4().hex
+            data = {'kind':'summarize','summaryMode':mode,'text':text}
+            if detail is not None:
+                data['summaryDetail'] = detail
+            self.app.start_inference(identifier, 'local', data)
+            return wait_for(lambda:self.app.inference_jobs.get(identifier, 'local'))
+        detailed = run('video-chunk')
+        concise = run('video-chunk', 'concise')
+        self.assertEqual(concise['stage'], 'done')
+        self.assertFalse(concise['cached'])
+        payload = self.calls[-1]
+        self.assertIn(json.dumps({'影片字幕片段':text},ensure_ascii=False),payload['messages'][1]['content'])
+        self.assertIn('請只用台灣繁體中文回答',payload['messages'][1]['content'])
+        self.assertEqual(payload['options'], {'temperature':0,'num_ctx':8192,'num_predict':320})
+        self.assertEqual(payload['keep_alive'], '10m')
+        self.assertIn('兩個條列重點', payload['messages'][0]['content'])
+        self.assertTrue(run('video-chunk','concise')['cached'])
+        self.assertTrue(run('video-chunk','detailed')['cached'])
+        self.assertEqual(detailed['modelIdentity'], concise['modelIdentity'])
+        run('video-overview','concise')
+        self.assertEqual(self.calls[-1]['options']['num_predict'],384)
+        self.assertIn('一句總覽',self.calls[-1]['messages'][0]['content'])
+        for mode,detail in [(None,'concise'),('video-chunk','unknown'),('video-chunk',{})]:
+            with self.assertRaises(UserError) as error:
+                run(mode,detail)
+            self.assertEqual(error.exception.code,'SUMMARY_DETAIL')
+        self.assertTrue(self.app.health()['video_summary_concise'])
         self.run_text('word '*300, profile='video')
         self.assertEqual(self.calls[-1]['options']['num_ctx'], 8192)
 

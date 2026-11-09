@@ -16,7 +16,7 @@
   const records = new Map();
   const rendered = new Map();
   const renderedSelection = new Map();
-  let currentJob = null;
+  let currentJob = null, currentJobUrl = null;
   let selectionJob = null;
   let layoutStyle = null;
   let displaySheet = null;
@@ -267,7 +267,7 @@
     renderedObserver.disconnect();
     clearSelectionTranslations();
     for (const item of rendered.values()) removeTranslation(item);
-    rendered.clear(); records.clear(); currentJob = null;
+    rendered.clear(); records.clear(); currentJob = null; currentJobUrl = null;
     setDisplayMode(false);
     layoutStyle?.remove(); layoutStyle = null;
   }
@@ -312,9 +312,11 @@
   }
   async function collect(message) {
     const summary = message.type === 'qingread:summary-source';
+    const sourceUrl = location.href;
+    if (!summary && typeof message.sourceUrl === 'string' && message.sourceUrl !== sourceUrl) return {error:'changed'};
     const epoch = summary ? ++summaryEpoch : ++collectionEpoch;
-    const live = () => summary ? epoch === summaryEpoch : epoch === collectionEpoch && currentJob === message.job;
-    if (!summary) { records.clear(); currentJob = message.job; }
+    const live = () => summary ? epoch === summaryEpoch : epoch === collectionEpoch && currentJob === message.job && location.href === sourceUrl;
+    if (!summary) { records.clear(); currentJob = message.job; currentJobUrl = sourceUrl; }
     if (rendered.size || renderedSelection.size) pruneRendered();
     const first = await collectAttempt(message, summary, live);
     // Retake a changed page once, but never retry a selection, a stopped job or a superseded request.
@@ -410,6 +412,7 @@
   }
   function apply(message) {
     if (message.job !== currentJob) return { applied: false };
+    if (location.href !== currentJobUrl) return { error:'changed' };
     const record = records.get(message.id);
     if (!record || typeof message.text !== 'string' || message.text.length > 100000) return { applied: false };
     records.delete(message.id);
@@ -465,6 +468,7 @@
       }
       else if (message?.type === 'qingread:frames') respond({frames:embeddedPages()});
       else if (message?.type === 'qingread:prioritize' && message.job === currentJob) {
+        if (location.href !== currentJobUrl) { respond({error:'changed'}); return; }
         const context=readContext();respond({ ids: [...records].sort((a,b) => distance(a[1].element,context)-distance(b[1].element,context)).map(([id]) => id) });
       }
       else if (message?.type === 'qingread:apply') respond(apply(message));
@@ -473,7 +477,7 @@
         respond({translationOnly});
       }
       else if (message?.type === 'qingread:restore') { removeTranslations(); respond({ restored: true }); }
-      else if (message?.type === 'qingread:cancel') { if (currentJob === message.job) { collectionEpoch++;currentJob = null; records.clear(); } respond({ stopped: true }); }
+      else if (message?.type === 'qingread:cancel') { if (currentJob === message.job) { collectionEpoch++;currentJob = null;currentJobUrl = null;records.clear(); } respond({ stopped: true }); }
     } catch { respond({ error: 'page' }); }
   });
 })();

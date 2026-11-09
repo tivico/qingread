@@ -14,13 +14,14 @@ if ($package.version -ne $manifest.version -or $appVersion -ne $manifest.version
 $extensionFiles = @(
     'manifest.json', 'INSTALL.txt', 'background.js', 'panel.html', 'panel.js',
     'panel.css', 'playful.css', 'mascot.svg', 'content.js', 'core.js', 'frames.js',
-    'local-client.js', 'summary.js', 'text.js', 'caption-state.js', 'speech-state.js',
+    'local-client.js', 'summary.js', 'video-summary-core.js', 'video-summary.js',
+    'transcript-content.js', 'text.js', 'caption-state.js', 'speech-state.js',
     'audio-worklet.js', 'media-content.js', 'video.js', 'video-pipeline.js',
     'video-background.js', 'video-clock.js', 'video-offscreen.html', 'video-offscreen.js',
     'workspace.html', 'workspace.js', 'workspace.css'
 )
 $companionFiles = @(
-    'app.py', 'inference.py', 'pairing.py', 'pdf_progress.py', 'pdf_worker.py',
+    'app.py', 'inference.py', 'pairing.py', 'runtime_status.py', 'launcher.py', 'pdf_progress.py', 'pdf_worker.py',
     'prepare.py', 'install.cmd', 'start.cmd', 'requirements.txt', 'requirements-lock.txt',
     'licenses/BabelDOC-AGPL-3.0.txt'
 )

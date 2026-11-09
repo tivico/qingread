@@ -3,19 +3,41 @@ const el = id => document.getElementById(id);
 const local = QingReadLocal;
 let connected = false, polling = false;
 let previewSupported=false;
+let helperUpdateRequired=false;
 let pairing = null;
 let connectionEpoch=0;
 const notice = text => { el('notice').textContent = text; };
+function showChecks(checks) {
+  el('setup-checks').replaceChildren(...checks.map(check=>{
+    const item=document.createElement('li'),title=document.createElement('strong'),detail=document.createElement('span');
+    title.textContent=`${check.ready?'已就緒':'待處理'} · ${check.label}`;
+    detail.textContent=check.detail;
+    item.dataset.ready=String(check.ready);item.append(title,detail);return item;
+  }));
+}
 async function attempt(action) { try { await action(); } catch (error) { notice(error.message); } }
 async function refresh() {
   const epoch=connectionEpoch;
-  const health = await local.request('/health');
+  let health;
+  try { health = await local.request('/health'); }
+  catch(error){
+    if(epoch!==connectionEpoch)return;
+    connected=false;previewSupported=false;el('preview-pdf').disabled=true;
+    el('health').textContent='助手連線未完成，尚未確認功能狀態。';
+    el('model').replaceChildren();
+    showChecks([{ready:false,label:'助手連線',detail:error.message}]);
+    throw error;
+  }
   if(epoch!==connectionEpoch)return;
   connected = true;
-  previewSupported=health.pdf_preview===true;el('preview-pdf').disabled=!previewSupported;
-  el('health').textContent = `助手已連線 · Ollama ${health.ollama ? '已啟動' : '未連線'} · PDF 資源${health.pdf_assets_ready ? '已準備' : '未準備'} · 語音${health.speech_ready ? '已準備' : '未準備'}`;
-  el('model').replaceChildren(...health.models.map(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; return option; }));
-  el('model').value = health.selected_model || health.models[0] || '';
+  const update=local.needsUpdate(health),models=Array.isArray(health.models)?health.models:[];
+  helperUpdateRequired=update;
+  previewSupported=health.pdf_preview===true&&!update;el('preview-pdf').disabled=!previewSupported;
+  for(const id of ['translate-pdf','prepare-pdf','prepare-speech','save-model'])el(id).disabled=update;
+  showChecks(local.healthChecks(health));
+  el('health').textContent = update?'助手可連線，但尚未載入更新；請查看準備檢查。':`助手已連線 · 版本 ${health.version || '未提供'}；各功能狀態請查看準備檢查。`;
+  el('model').replaceChildren(...models.map(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; return option; }));
+  el('model').value = health.selected_model || models[0] || '';
   await jobs();
 }
 el('connect').onclick = () => {
@@ -84,12 +106,14 @@ el('forget-device').onclick=()=>attempt(async()=>{
   previewSupported=false;el('preview-pdf').disabled=true;
   el('health').textContent='尚未連線';el('model').replaceChildren();el('jobs').replaceChildren();
   el('pair-status').textContent='已清除本外掛儲存的配對。';
+  showChecks([{ready:false,label:'助手連線',detail:'尚未配對，請按「連接本機助手」。'}]);
   notice('已忘記這台電腦。已送出的工作不會因此停止；需要時請重新連接。');
 });
 el('refresh').onclick = () => attempt(refresh);
-el('save-model').onclick = () => attempt(async () => { await local.request('/settings', { body: { model: el('model').value } }); notice('已選擇本機翻譯模型。'); });
+el('save-model').onclick = () => attempt(async () => { await local.request('/settings', { body: { model: el('model').value } }); await refresh();notice('已選擇本機翻譯模型。'); });
 for (const [id, kind] of [['prepare-pdf','pdf-assets'], ['prepare-speech','speech']]) el(id).onclick = () => attempt(async () => { await local.request('/prepare', { body: { kind } }); notice('開始下載，請查看工作狀態。'); await jobs(); });
 async function submitPdf(preview=false) {
+  if(helperUpdateRequired)throw new Error('助手尚未載入更新，文件未送出。請先停止字幕並等工作結束，再開 companion/start.cmd 並重新檢查連線。');
   if(preview&&!previewSupported)throw new Error('請重新啟動新版助手，確認支援兩頁試翻後再試。');
   const file = el('pdf').files[0];
   if (!file || file.size > 64 * 1024 * 1024) throw new Error('請選擇 64 MB 以內的 PDF。');

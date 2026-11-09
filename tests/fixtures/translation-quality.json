@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "target": "zh-Hant-TW",
+  "scope": "人工原文；評估文字引擎與短字幕，不代表真實網站、PDF 排版或語音辨識品質。",
+  "cases": [
+    {"id":"en-negation","language":"en","source":"Do not delete existing reservations. Only new reservations are paused; existing reservations remain valid.","reviewNotes":"必須保留兩次 existing 的對象；暫停的是新預約，不能譯成刪除或取消舊預約。","requiredLiterals":[]},
+    {"id":"en-numbers","language":"en","source":"The optional workshop costs NT$120 and lasts 30 minutes. The reading room is free and does not require a ticket.","reviewNotes":"保留費用、時間、非強制參加與閱覽室免費，不可將費用套用到閱覽室。","requiredLiterals":["120","30"]},
+    {"id":"en-code","language":"en","source":"Send a GET request to /api/show and read message.content. Keep the model identifier local:test unchanged.","reviewNotes":"保留 API 路徑、欄位、模型識別及 GET，不能翻成中文或變更標點。","requiredLiterals":["GET","/api/show","message.content","local:test"]},
+    {"id":"en-context","language":"en","source":"The server rejected the request because its token had expired. Refresh the token, then retry the request. Restarting the server is unnecessary.","reviewNotes":"過期的是 token；需要更新憑證再重試，沒有要求重新啟動伺服器。","requiredLiterals":[]},
+    {"id":"en-conditions","language":"en","source":"If the backup fails, stop the upgrade. Continue only after the backup has been verified. A successful download does not mean the upgrade is complete.","reviewNotes":"保留停止條件、備份驗證後才繼續，以及下載成功不等於升級完成。","requiredLiterals":[]},
+    {"id":"en-subtitle","language":"en","profile":"video","source":"Wait, keep the original file. We will check the translation first.","reviewNotes":"短字幕應完整保留原檔與先核對譯文的順序，注意實際閱讀速度。","requiredLiterals":[]},
+    {"id":"ja-negation","language":"ja","source":"設定を変更しても、保存済みのデータは削除されません。ただし、まだ保存していない変更は失われます。","reviewNotes":"已儲存資料不會被刪除；未儲存的修改會遺失，兩種資料不可混淆。","requiredLiterals":[]},
+    {"id":"ja-request","language":"ja","source":"恐れ入りますが、金曜日までにご確認いただけますか。難しい場合は、来週の月曜日でも構いません。","reviewNotes":"有禮貌的請求，週五為期望期限，週一是可接受的替代時間，不能譯成兩個強制期限。","requiredLiterals":[]},
+    {"id":"ko-permission","language":"ko","source":"이 폴더에는 읽기 권한만 부여하세요. 파일을 수정하거나 삭제할 수 있는 권한은 필요하지 않습니다.","reviewNotes":"只給讀取權限，不需要修改或刪除權限。","requiredLiterals":[]},
+    {"id":"de-exception","language":"de","source":"Die Bibliothek bleibt am Freitag geschlossen. Bereits bestätigte Reservierungen bleiben jedoch gültig.","reviewNotes":"週五休館，但已確認預約仍然有效。","requiredLiterals":[]},
+    {"id":"fr-optional","language":"fr","source":"La mise à jour est facultative. Elle ne supprime pas vos documents, mais vous devez fermer les fichiers ouverts avant de continuer.","reviewNotes":"更新是選用、不刪文件，但繼續前必須關閉已開啟檔案。","requiredLiterals":[]},
+    {"id":"es-limits","language":"es","source":"El resumen incluye solo el texto visible de la página, hasta 6000 caracteres. No analiza imágenes ni abre enlaces adicionales.","reviewNotes":"只讀可見文字，最多 6000 字元，不分析圖片、不開其他連結；不能擴大摘要範圍。","requiredLiterals":["6000"]}
+  ]
+}

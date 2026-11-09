@@ -9,5 +9,5 @@ if not exist .venv\Scripts\python.exe (
   pause
   exit /b 1
 )
-.venv\Scripts\python.exe app.py
+.venv\Scripts\python.exe launcher.py
 pause

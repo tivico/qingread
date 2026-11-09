@@ -14,12 +14,14 @@
   <script src="video-pipeline.js" defer></script>
   <script src="video.js" defer></script>
   <script src="summary.js" defer></script>
+  <script src="video-summary-core.js" defer></script>
+  <script src="video-summary.js" defer></script>
   <script src="frames.js" defer></script>
   <script src="text.js" defer></script>
 </head>
 <body class="panel">
   <header><img class="mascot" src="mascot.svg" alt="" width="64" height="64"><div><h1>清讀</h1><p>和小讀一起，看懂全世界。</p></div><span class="badge">v0.3.9</span></header>
-  <nav aria-label="功能"><button data-view="web" aria-pressed="true">網頁翻譯</button><button data-view="text" aria-pressed="false">文字翻譯</button><button data-view="video" aria-pressed="false">影片字幕</button><button data-view="summary" aria-pressed="false">網頁摘要</button><button data-view="settings" aria-pressed="false">設定</button></nav><main>
+  <nav aria-label="功能"><button data-view="web" aria-pressed="true">網頁翻譯</button><button data-view="text" aria-pressed="false">文字翻譯</button><button data-view="video" aria-pressed="false">影片字幕</button><button data-view="summary" aria-pressed="false">摘要</button><button data-view="settings" aria-pressed="false">設定</button></nav><main>
 
     <section class="card engine-card" aria-label="翻譯設定">
       <label for="engine">翻譯引擎</label>
@@ -41,12 +43,31 @@
       <section class="status-card" aria-label="翻譯狀態">
         <p id="status" role="status" aria-live="polite">正在準備…</p>
         <progress id="progress" max="1" value="0" aria-label="翻譯進度"></progress>
+        <div id="site-entry" hidden><label for="site-url">Chrome 隱藏了目前網址。貼上目前網頁網址，只允許這個網站：</label><input id="site-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://目前網站/…"><p class="hint">只用來確認網站授權，不保存、不交給模型。經常換網站，可到「設定」選擇「允許所有一般網站」。</p></div>
         <button id="grant-site" hidden>允許此網站</button>
         <p id="detail" class="hint">按開始後，譯文會依選擇的方式顯示在網頁上。</p>
       </section>
     </section>
     <section data-page="text" hidden class="card"><h2>貼上文字，輕鬆讀懂。</h2><div class="text-panes"><div><label for="text-input">原文</label><textarea id="text-input" rows="7" maxlength="6000" placeholder="在這裡輸入或貼上要翻譯的文字…" spellcheck="false" aria-describedby="text-language-hint"></textarea><p id="text-count" class="hint">0 / 6,000 字元</p><p id="text-language-hint" class="hint"></p></div><div><label for="text-output">繁體中文</label><textarea id="text-output" rows="7" readonly placeholder="譯文會顯示在這裡。" spellcheck="false"></textarea></div></div><button id="text-start" class="primary" disabled>翻譯文字</button><div class="actions"><button id="text-stop" disabled>停止</button><button id="text-retry" hidden>接續翻譯</button><button id="text-copy" disabled>複製譯文</button><button id="text-clear">清空</button></div><p id="text-status" class="hint" role="status">使用上方所選引擎與原文語言。按翻譯後才處理，不讀取目前網頁。</p><p class="hint">輸入與譯文不儲存為歷史紀錄；關閉側欄後可能遺失，請先複製需要的內容。</p></section>
-    <section data-page="summary" hidden class="card"><h2>讀完，抓住重點。</h2><p class="hint">使用已配對的本機助手整理繁中摘要；Chrome 語言包只負責翻譯。摘要不會送往雲端。先整理總覽與三個重點，產生中的文字會逐步顯示。</p><p class="hint">讀取目前頁面可見正文（含已展開 FAQ），最多前 6,000 字元，不含未開啟的課程或連結內容。擷取後可切換分頁，結果會保留來源標示；關閉側欄仍會停止未完成工作。</p><p id="summary-source" class="hint" hidden></p><button id="summary-start" class="primary">整理目前分頁摘要</button><div class="actions"><button id="summary-stop" disabled>停止摘要</button><button id="summary-copy" disabled>複製摘要</button></div><p id="summary-status" role="status" class="hint">請先在「PDF 與助手設定」完成配對。</p><div id="summary-site-entry" hidden><label for="summary-site-url">Chrome 隱藏了目前網址。貼上這個網頁的網址，只授權這個網站：</label><input id="summary-site-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://目前網站/…"><p class="hint">網址只用來確認網站存取權，不會送給模型或保存。也可直接點 Chrome 工具列的清讀圖示後再試。</p></div><button id="summary-grant" hidden>允許此網站</button><section id="summary-output" hidden aria-labelledby="summary-output-title" aria-live="polite"><h3 id="summary-output-title">摘要結果</h3><div id="summary-result"></div></section></section>
+    <div data-page="summary" hidden class="summary-pages">
+    <section class="card"><h2>網頁摘要 · 讀完，抓住重點。</h2><p class="hint">使用已配對的本機助手整理繁中摘要；Chrome 語言包只負責翻譯。摘要不會送往雲端。先整理總覽與三個重點，產生中的文字會逐步顯示。</p><p class="hint">讀取目前頁面可見正文（含已展開 FAQ），最多前 6,000 字元，不含未開啟的課程或連結內容。擷取後可切換分頁，結果會保留來源標示；關閉側欄仍會停止未完成工作。</p><p id="summary-source" class="hint" hidden></p><button id="summary-start" class="primary">整理目前分頁摘要</button><div class="actions"><button id="summary-stop" disabled>停止摘要</button><button id="summary-copy" disabled>複製摘要</button></div><p id="summary-status" role="status" class="hint">請先在「PDF 與助手設定」完成配對。</p><div id="summary-site-entry" hidden><label for="summary-site-url">Chrome 隱藏了目前網址。貼上這個網頁的網址，只授權這個網站：</label><input id="summary-site-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://目前網站/…"><p class="hint">網址只用來確認網站存取權，不會送給模型或保存。也可直接點 Chrome 工具列的清讀圖示後再試。</p></div><button id="summary-grant" hidden>允許此網站</button><section id="summary-output" hidden aria-labelledby="summary-output-title" aria-live="polite"><h3 id="summary-output-title">摘要結果</h3><div id="summary-result"></div></section></section>
+    <section id="vs-section" class="card">
+      <h2>影片摘要 · 先抓重點，再深入看。</h2>
+      <p class="hint">開啟電腦版 YouTube 影片，按下方按鈕即可。清讀會自動尋找、展開逐字稿，等待字幕載入後整理；支援新版「字幕記錄」與舊版逐字稿。若逐字稿有搜尋條件，請先清空。</p>
+      <p class="hint">使用已配對的本機助手，依原文分段整理、再整合總覽。只根據讀到的字幕，不分析畫面，也不保證涵蓋全片。最多 240,000 字元／12,000 段；長片可能等候較久，可隨時停止並保留已完成段落。</p>
+      <label for="vs-detail">摘要詳略</label><select id="vs-detail"><option value="concise">精簡重點 · 較快</option><option value="detailed">詳細整理 · 篇幅較多</option></select>
+      <p class="hint">兩種模式都讀取相同字幕；精簡每段列兩個短重點，減少生成時間。需要原本較完整的文字，可選詳細整理。</p>
+      <button id="vs-start" class="primary">整理目前影片重點</button>
+      <div class="actions"><button id="vs-stop" disabled>停止影片摘要</button><button id="vs-copy" disabled>複製影片摘要</button></div>
+      <p id="vs-status" class="hint" role="status">請先在「PDF 與助手設定」完成配對。讀取字幕後可切換分頁；關閉側欄仍會停止未完成工作。</p>
+      <button id="vs-access" hidden>處理此網站的存取權</button>
+      <p id="vs-source" class="hint" hidden></p><p id="vs-preview" class="hint"></p>
+      <details><summary>查看摘要耗時</summary><p id="vs-timing" class="hint">完成一段後會顯示模型讀取與生成耗時。</p></details>
+      <section id="vs-output" hidden aria-labelledby="vs-output-title"><h3 id="vs-output-title">影片重點</h3>
+        <div id="vs-overview"></div><h3>分段重點 · 點時間回看</h3><div id="vs-notes"></div>
+      </section>
+    </section>
+    </div>
     <section data-page="video" hidden class="card">
       <h2>影片翻譯字幕</h2>
       <label for="video-mode">字幕來源</label>
@@ -59,10 +80,11 @@
       <button id="video-access" hidden>處理此網站的存取權</button>
       <p id="video-status" class="hint" role="status">先開啟影片，再開始。字幕與整頁翻譯請分開使用。</p>
       <details><summary>查看字幕耗時</summary><p id="video-timing" class="hint">完成一筆字幕後會顯示耗時。本機模型會另外提供排隊、載入、讀文與生成時間。</p></details>
+      <button id="video-summary-open" class="workspace-link">先看影片摘要 →</button>
       <label class="check"><input id="hover" type="checkbox">啟用滑過單字解釋（按住 Alt）</label>
       <p class="hint">需本機助手；按住 Alt 滑過英文單字，停留片刻即可查看詞義與例句。</p>
     </section>
-    <section data-page="settings" hidden class="card"><h2>閱讀偏好</h2><button id="detect">辨識目前網頁語言</button>      <label class="check"><input id="terms" type="checkbox">套用常見台灣用語</label>
+    <section data-page="settings" hidden class="card"><h2>網站存取</h2><p class="hint">預設逐站允許。若常換網站，可選擇允許清讀讀取所有一般 http／https 網站，減少重複授權；仍只在按開始後擷取內容。這會擴大網站讀取範圍，由 Chrome 顯示授權確認。</p><button id="all-sites-grant">允許所有一般網站</button><p id="all-sites-status" class="hint" role="status">可保留逐站授權；不需要為了使用清讀而允許所有網站。</p><p class="hint">撤回或調整：Chrome → 擴充功能 → 清讀 → 詳細資料 → 網站存取權，可改回點選時或指定網站。Chrome 內部頁面及受保護頁面仍可能無法讀取。</p><h2>閱讀偏好</h2><button id="detect">辨識目前網頁語言</button>      <label class="check"><input id="terms" type="checkbox">套用常見台灣用語</label>
       <p class="hint">選用：軟件 → 軟體等五組詞彙替換，可能影響專有名稱；不會重寫整段句子。</p>
       <details><summary>自訂譯文詞彙表</summary><label for="glossary">每行一組：原譯詞 =&gt; 慣用詞</label><textarea id="glossary" rows="4" maxlength="17000" placeholder="內存 => 記憶體"></textarea><button id="save-glossary">儲存詞彙表</button><p id="glossary-status" class="hint">套用於網頁與影片譯文，區分大小寫、依字面替換；不影響 PDF。儲存在這台瀏覽器，可能改到專有名稱。留白再儲存即可清除。</p></details>
       <p class="hint">優先翻譯目前閱讀位置，捲動後調整未完成段落順序。每次最多 200 段／60,000 字元；動態載入後可再次開始。</p>

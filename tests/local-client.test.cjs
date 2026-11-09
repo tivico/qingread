@@ -7,6 +7,30 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../extension/local-client.js'), 'utf8');
 const token = 'a'.repeat(43);
 
+test('same-version stale runtime blocks source submission even when capabilities are present',async()=>{
+  const calls=[];
+  const local=client(async(url,options)=>{
+    calls.push({url,method:options.method,body:options.body});
+    return new Response(JSON.stringify({inference_jobs:true,inference_client_identity:true,
+      runtime:{revision:'a'.repeat(64),updateRequired:true}}));
+  });
+  await assert.rejects(local.request('/translate',{body:{text:'Private input'},managed:true}),
+    error=>error.code==='COMPANION_UPDATE_REQUIRED');
+  assert.equal(calls.length,1);assert.equal(calls[0].method,'GET');assert.equal(calls[0].body,undefined);
+});
+
+test('readiness separates connection, missing model, optional resources and legacy update checks',()=>{
+  const local=client(async()=>{});
+  const checks=local.healthChecks({models:['local:test'],selected_model:'',ollama:true,pdf_installed:true});
+  assert.equal(checks.find(c=>c.label==='Ollama').ready,true);
+  assert.equal(checks.find(c=>c.label==='文字翻譯與摘要').ready,false);
+  assert.match(checks.find(c=>c.label==='文字翻譯與摘要').detail,/使用這個模型/);
+  assert.match(checks[0].detail,/舊助手/);
+  const ready=local.healthChecks({models:['local:test'],selected_model:'local:test',ollama:true,pdf_installed:true,
+    pdf_assets_ready:true,speech_ready:true,runtime:{revision:'a'.repeat(64),updateRequired:false}});
+  assert.ok(ready.every(c=>c.ready));
+});
+
 function client(fetch, saved = { companionToken: token }, persisted = {}) {
   const context = {
     fetch, Blob, ArrayBuffer, TextDecoder, AbortController, AbortSignal, DOMException, crypto, setTimeout, clearTimeout,
@@ -71,6 +95,35 @@ test('video inference requires the companion capability and preserves text plus 
     }
     await translator.destroy();
   }
+});
+
+test('video summary checks capability before sending private transcript and passes the summary mode',async()=>{
+  for(const supported of [false,true]){
+    const posts=[];
+    const local=client(async(url,options)=>{
+      if(url.endsWith('/health'))return new Response(JSON.stringify({inference_jobs:true,inference_client_identity:true,video_summary:supported}));
+      if(options.method==='POST')posts.push(JSON.parse(options.body));
+      return new Response(JSON.stringify({stage:'done',text:'摘要',modelIdentity:'a'.repeat(64)}));
+    });
+    const request=local.request('/summarize',{managed:true,body:{text:'Private transcript',summaryMode:'video-chunk'}});
+    if(!supported){await assert.rejects(request,e=>e.code==='COMPANION_UPDATE_REQUIRED');assert.equal(posts.length,0);}
+    else{await request;assert.equal(posts[0].summaryMode,'video-chunk');assert.equal(posts[0].kind,'summarize');}
+  }
+});
+
+test('concise summary capability is checked before transcript is sent; detailed remains compatible',async()=>{
+ for(const supported of [false,true]){
+  const posts=[];
+  const local=client(async(url,options)=>{
+   if(url.endsWith('/health'))return new Response(JSON.stringify({inference_jobs:true,inference_client_identity:true,video_summary:true,video_summary_concise:supported}));
+   if(options.method==='POST')posts.push(JSON.parse(options.body));
+   return new Response(JSON.stringify({stage:'done',text:'重點'}));
+  });
+  const pending=local.request('/summarize',{managed:true,body:{text:'Full transcript',summaryMode:'video-chunk',summaryDetail:'concise'}});
+  if(supported){await pending;assert.equal(posts[0].summaryDetail,'concise');}
+  else{await assert.rejects(pending,e=>e.code==='COMPANION_UPDATE_REQUIRED');assert.equal(posts.length,0);}
+  await local.request('/summarize',{managed:true,body:{text:'Full transcript',summaryMode:'video-chunk'}});
+ }
 });
 
 test('stopping during compatibility check never creates or cancels a nonexistent model job', async () => {
@@ -276,6 +329,98 @@ test('managed work reports queue and generation stages before returning cached m
   assert.deepEqual(JSON.parse(requests[0].options.body),{text:'原文',source:'en',kind:'translate'});
   assert.equal(requests.filter(r=>r.options.method==='POST').length,1);
   assert.ok(requests.every(r=>r.options.headers['X-QingRead-Client']==='a'.repeat(32)));
+});
+
+test('a brief lost translation poll recovers using the original job without resubmitting', async () => {
+  const calls = [], stages = [];
+  let polls = 0;
+  const local = managedClient(async (url, {method, body}) => {
+    calls.push({url, method, body});
+    if (method === 'POST') return new Response('{"stage":"generating"}');
+    if (method === 'DELETE') return new Response('{"stage":"cancelled"}');
+    if (++polls === 1) throw new TypeError('connection dropped');
+    if (polls === 2) return new Response('{"stage":"generating"}');
+    return new Response('{"stage":"done","text":"完成"}');
+  });
+  const result = await local.request('/translate', {
+    body: {text:'Sample'}, managed:true, onProgress: event => stages.push(event.stage)
+  });
+  assert.equal(result.text, '完成');
+  assert.deepEqual(stages, ['generating', 'reconnecting', 'generating']);
+  assert.deepEqual(calls.map(call => call.method), ['POST', 'GET', 'GET', 'GET']);
+  assert.equal(new Set(calls.map(call => call.url)).size, 1);
+  assert.ok(calls.slice(1).every(call => call.body === undefined));
+});
+
+test('repeated lost translation polls exhaust a finite budget and cancel only the original job', async () => {
+  const calls = [];
+  const local = managedClient(async (url, {method}) => {
+    calls.push({url, method});
+    if (method === 'POST') return new Response('{"stage":"generating"}');
+    if (method === 'DELETE') return new Response('{"stage":"cancelled"}');
+    throw new TypeError('connection dropped');
+  });
+  await assert.rejects(local.request('/translate', {body:{text:'Sample'}, managed:true}), /無法連線到本機助手/);
+  assert.deepEqual(calls.map(call => call.method), ['POST','GET','GET','GET','DELETE']);
+  assert.equal(new Set(calls.map(call => call.url)).size, 1);
+});
+
+test('a dropped response body retries the accepted translation without creating another job', async () => {
+  const methods = [], stages = [];
+  let polls = 0;
+  const local = managedClient(async (_url, {method}) => {
+    methods.push(method);
+    if (method === 'POST') return new Response('{"stage":"generating"}');
+    if (method === 'DELETE') return new Response('{"stage":"cancelled"}');
+    if (++polls === 1) return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode('{"stage":')); controller.error(new TypeError('connection terminated')); }
+    }));
+    return new Response('{"stage":"done","text":"恢復完成"}');
+  });
+  const result = await local.request('/translate', {body:{text:'Sample'}, managed:true,onProgress:event=>stages.push(event.stage)});
+  assert.equal(result.text,'恢復完成');
+  assert.deepEqual(methods,['POST','GET','GET']);
+  assert.ok(stages.includes('reconnecting'));
+});
+
+test('invalid JSON is reported as an invalid companion response without retrying the job', async () => {
+  const methods = [];
+  const local = managedClient(async (_url, {method}) => {
+    methods.push(method);
+    return new Response(method === 'POST' ? '{"stage":"generating"}' : method === 'DELETE' ? '{"stage":"cancelled"}' : '<html>broken response</html>');
+  });
+  await assert.rejects(local.request('/translate', {body:{text:'Sample'},managed:true}),
+    error=>error.code === 'COMPANION_RESPONSE' && /回應格式/.test(error.message));
+  assert.deepEqual(methods,['POST','GET','DELETE']);
+});
+
+test('stopping while a response body fails reports cancellation without reconnecting', async () => {
+  const controller = new AbortController(), stages = [], methods = [];
+  const local = managedClient(async (_url, {method}) => {
+    methods.push(method);
+    if (method === 'POST') return new Response('{"stage":"generating"}');
+    if (method === 'DELETE') return new Response('{"stage":"cancelled"}');
+    return {ok:true,json:async()=>{controller.abort();throw new TypeError('body interrupted');}};
+  });
+  await assert.rejects(local.request('/translate', {body:{text:'Sample'},managed:true,signal:controller.signal,onProgress:event=>stages.push(event.stage)}),
+    error=>error.name === 'AbortError' && error.cancelState === 'cancelled');
+  assert.deepEqual(methods,['POST','GET','DELETE']);
+  assert.ok(!stages.includes('reconnecting'));
+});
+
+test('stopping during translation reconnection cancels immediately without another poll', async () => {
+  const controller = new AbortController(), methods = [];
+  const local = managedClient(async (_url, {method}) => {
+    methods.push(method);
+    if (method === 'POST') return new Response('{"stage":"generating"}');
+    if (method === 'DELETE') return new Response('{"stage":"cancelled"}');
+    throw new TypeError('connection dropped');
+  });
+  await assert.rejects(local.request('/translate', {
+    body:{text:'Sample'}, managed:true, signal:controller.signal,
+    onProgress: ({stage}) => { if (stage === 'reconnecting') controller.abort(); }
+  }), error => error.name === 'AbortError' && error.cancelState === 'cancelled');
+  assert.deepEqual(methods, ['POST','GET','DELETE']);
 });
 
 test('managed cancellation confirms cleanup even when creation has not returned', async () => {

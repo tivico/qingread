@@ -44,6 +44,38 @@ const fs=require('node:fs');const path=require('node:path');const assert=require
    await article.locator('main h1').waitFor({state:'visible'});
    assert.equal(await article.locator('[data-qingread=translation]').count(),1);
    report.realTranslationDisplayToggle=true;
+   // Keep the source document alive while activating another real browser tab.
+   await panel.evaluate(()=>{
+    document.querySelector('#engine').value='local';document.querySelector('#engine').dispatchEvent(new Event('change'));
+    QingReadLocal.translator=()=>({translate:()=>new Promise(resolve=>{globalThis.finishHiddenTranslation=resolve;}),destroy(){}});
+    document.querySelector('#start').click();
+   });
+   await panel.waitForFunction(()=>typeof globalThis.finishHiddenTranslation==='function');
+   const other=await context.newPage();
+   await other.goto('data:text/html,<main>Different tab</main>');await other.bringToFront();
+   await panel.waitForFunction(()=>running?.sourceAway===true);
+   await panel.evaluate(()=>{
+    Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
+    document.dispatchEvent(new Event('visibilitychange'));
+   });
+   assert.equal(await panel.locator('#stop').isEnabled(),true);
+   await panel.evaluate(()=>finishHiddenTranslation('人工測試：側欄暫時不可見時，原頁仍收到譯文。'));
+   await panel.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('完成 1 段'));
+   assert.equal(await article.locator('[data-qingread=translation]').count(),2);
+   assert.equal(await other.locator('[data-qingread=translation]').count(),0);
+   report.webTranslationAfterSimulatedPanelOcclusion=true;
+   report.webTranslationAfterNativeTabSwitch=true;
+   await article.bringToFront();
+   await panel.evaluate(()=>{
+    Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});
+    document.querySelector('#restore').click();
+   });
+   await panel.waitForFunction(()=>document.querySelector('#status').textContent==='已還原目前網頁。');
+   assert.equal(await article.locator('[data-qingread=translation]').count(),0);
+   assert.equal(await article.locator('main h1').textContent(),'Reading review');
+   assert.equal(await article.locator('main h1').isVisible(),true);
+   assert.equal(await panel.locator('#start').isEnabled(),true);
+   report.realDocumentRestore=true;
   }
   if(process.env.CAPTURE_SUMMARY_SOURCE)fs.writeFileSync(path.join(results,'summary-benchmark-source.txt'),extracted.text);
   if(process.env.LIVE_SUMMARY){

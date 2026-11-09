@@ -3,6 +3,24 @@ globalThis.QingReadLocal = {
   TIMEOUT_MS: 180000,
   credentialRevision: 0,
   credentialWrites: Promise.resolve(),
+  needsUpdate(health) {
+    return Boolean(health?.runtime && (health.runtime.updateRequired !== false ||
+      !/^[a-f0-9]{64}$/.test(health.runtime.revision || '')));
+  },
+  healthChecks(health) {
+    const models=Array.isArray(health?.models)?health.models:[];
+    const modelReady=Boolean(health?.ollama && health.selected_model && models.includes(health.selected_model));
+    const update=this.needsUpdate(health);
+    return [
+      {ready:!update && Boolean(health.runtime),label:'助手更新',detail:update
+        ?'檔案已有更新，執行中的助手尚未載入。先停止字幕並等工作結束，再雙擊 companion/start.cmd，最後重新檢查連線。'
+        :health.runtime?'已載入目前程式。':'舊助手未提供更新檢查。先結束工作並關閉原助手，再開新版 companion/start.cmd。'},
+      {ready:Boolean(health.ollama),label:'Ollama',detail:health.ollama?'已連線。':'請先啟動 Ollama，再按「重新檢查連線」。'},
+      {ready:modelReady,label:'文字翻譯與摘要',detail:modelReady?'已選擇可用的本機模型。':!health.ollama?'等 Ollama 連線後，選擇已下載的模型。':!models.length?'Ollama 尚未有本機文字模型；先下載模型，再重新檢查連線。':'請在下方選擇模型，再按「使用這個模型」。'},
+      {ready:Boolean(health.pdf_installed && health.pdf_assets_ready),label:'PDF 排版',detail:!health.pdf_installed?'PDF 套件尚未就緒，請先執行 companion/install.cmd，再開 start.cmd。':health.pdf_assets_ready?'排版資源已準備；翻譯另需文字模型。':'按「下載 PDF 排版資源」準備；翻譯另需文字模型。'},
+      {ready:Boolean(health.speech_ready),label:'語音辨識',detail:health.speech_ready?'辨識模型已準備；字幕翻譯另需所選翻譯引擎。':'需要聆聽無字幕影片時，按「下載語音辨識模型」準備。'}
+    ];
+  },
   writeCredentials(action) {
     const pending=this.credentialWrites.then(action);
     this.credentialWrites=pending.catch(()=>{});
@@ -42,7 +60,7 @@ globalThis.QingReadLocal = {
     await this.writeCredentials(()=>Promise.all([chrome.storage.session.remove('companionToken'),chrome.storage.local.remove('rememberedCompanionToken')]));
   },
   stageText(event) {
-    return ({queued:'正在排隊，等候本機模型…',reading:'本機模型正在處理原文…',generating:'本機模型正在產生結果…',cancelling:'正在取消本機工作，等候釋放模型…'})[event.stage] || '';
+    return ({queued:'正在排隊，等候本機模型…',reading:'本機模型正在處理原文…',generating:'本機模型正在產生結果…',reconnecting:'本機助手暫時沒有回應，正在重新查詢同一筆翻譯…',cancelling:'正在取消本機工作，等候釋放模型…'})[event.stage] || '';
   },
   cancellationText(results) {
     if(!results.length)return '';
@@ -129,6 +147,15 @@ globalThis.QingReadLocal = {
     if (body && !(body instanceof Blob) && !(body instanceof ArrayBuffer)) {
       headers['Content-Type'] = 'application/json'; body = JSON.stringify(body);
     }
+    const readFailure = error => {
+      if (signal?.aborted) return new DOMException('Stopped', 'AbortError');
+      const invalid = error?.name === 'SyntaxError';
+      const failure = new Error(invalid
+        ? '本機助手回應格式不正確。請到「PDF 與助手設定」重新檢查連線，再重試。'
+        : '無法連線到本機助手，或處理逾時。請雙擊 companion/start.cmd，再到「PDF 與助手設定」按「重新檢查連線」。');
+      failure.code = invalid ? 'COMPANION_RESPONSE' : 'COMPANION_CONNECTION';
+      return failure;
+    };
     let response;
     try {
       response = await fetch('http://127.0.0.1:8765' + path, {
@@ -138,8 +165,7 @@ globalThis.QingReadLocal = {
         credentials: 'omit', cache: 'no-store', redirect: 'error'
       });
     } catch (error) {
-      if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
-      throw new Error('無法連線到本機助手，或處理逾時。請確認助手視窗仍開啟。');
+      throw readFailure(error);
     }
     if (!response.ok) {
       const value = await response.json().catch(() => ({}));
@@ -172,7 +198,10 @@ globalThis.QingReadLocal = {
         await reader.cancel().catch(()=>{});reader.releaseLock();
       }
     }
-    const value = await (binary ? response.blob() : response.json());
+    // fetch resolves at the headers. A connection can still fail while reading the body.
+    let value;
+    try { value = await (binary ? response.blob() : response.json()); }
+    catch (error) { throw readFailure(error); }
     if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
     return value;
   },
@@ -217,9 +246,11 @@ globalThis.QingReadLocal = {
       // Files on disk and the already-running helper can have the same version
       // but different capabilities. Check the process before sending source text.
       const health = await this.request('/health',{token,signal:combined});
-      if (health?.inference_jobs !== true || health?.inference_client_identity !== true ||
-          (body.profile === 'video' && health?.video_inference !== true)) {
-        const error = new Error('目前執行中的本機助手尚未載入必要更新。請先結束其他工作，關閉助手視窗，再重新啟動本專案的 companion/start.cmd，然後重試。只重載外掛不會更新已開啟的助手。');
+      if (this.needsUpdate(health) || health?.inference_jobs !== true || health?.inference_client_identity !== true ||
+          (body.profile === 'video' && health?.video_inference !== true) ||
+          (body.summaryMode?.startsWith('video-') && health?.video_summary !== true) ||
+          (body.summaryDetail === 'concise' && health?.video_summary_concise !== true)) {
+        const error = new Error('目前執行中的本機助手尚未載入必要更新。請先停止字幕並等工作結束，再重新啟動本專案的 companion/start.cmd；新版會在閒置時交接，舊助手首次升級需先關閉原助手。完成後重新檢查連線並重試。');
         error.code = 'COMPANION_UPDATE_REQUIRED';
         throw error;
       }
@@ -227,6 +258,8 @@ globalThis.QingReadLocal = {
       started = true;
       let result = await this.request(route,{body:{...body,kind},token,signal:combined,clientId});
       let previous = '';
+      // Only retry status reads for ordinary translation. Live captions have a tighter timing budget.
+      let remainingPollRetries = kind === 'translate' && !body.profile ? 2 : 0;
       while (true) {
         if (combined.aborted) throw new DOMException('Stopped','AbortError');
         if (!['queued','reading','generating','cancelling','done','failed','cancelled'].includes(result.stage)) throw new Error('助手工作狀態格式不正確，請重新啟動新版助手。');
@@ -240,7 +273,19 @@ globalThis.QingReadLocal = {
         const state = JSON.stringify([result.stage,result.text]);
         if(state!==previous){onProgress?.(result);previous=state;}
         await delay(250,combined);
-        result = await this.request(route,{token,signal:combined,clientId});
+        for (;;) {
+          try {
+            result = await this.request(route,{token,signal:combined,clientId});
+            break;
+          } catch (error) {
+            if (error.code !== 'COMPANION_CONNECTION' || error.status !== undefined ||
+                remainingPollRetries === 0 || combined.aborted) throw error;
+            remainingPollRetries--;
+            previous = '';
+            onProgress?.({stage:'reconnecting'});
+            await delay(500,combined);
+          }
+        }
       }
     } catch(error) {
       cancel();

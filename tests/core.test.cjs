@@ -4,6 +4,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { LIMITS, splitText, localize, errorText } = require('../extension/core.js');
 const { parseGlossary, applyGlossary, translateWebItem } = require('../extension/core.js');
+test('language quality signals warn without rejecting legitimate code and proper names',()=>{
+  const {translationWarnings}=require('../extension/core.js');
+  const spanish='El resumen incluye solo el texto visible de la página, hasta 6000 caracteres.';
+  assert.ok(translationWarnings(spanish,spanish,'es').length);
+  assert.ok(translationWarnings('設定を変更しても保存されます。','設定を変更後，資料保留。','ja').length);
+  assert.deepEqual(translationWarnings('/api/show GET local:test','/api/show GET local:test','en'),[]);
+  assert.deepEqual(translationWarnings('Keep the original file.','保留原始檔案。','en'),[]);
+});
 test('glossary uses longest literal match without chained replacements or regex execution',()=>{
   const rules=parseGlossary('內存 => 記憶體\n內存池 => 記憶體池\na.b => $&\n記憶體 => RAM');
   assert.equal(applyGlossary('內存池 內存 a.b axb 記憶體',rules),'記憶體池 記憶體 $& axb RAM');
