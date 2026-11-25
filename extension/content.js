@@ -77,6 +77,13 @@
     return context.clientRects.get(element);
   }
   const blockOf = node => node.parentElement.closest(BLOCKS) || node.parentElement;
+  function isLinkedCardParagraph(element) {
+    // A card's outer link can wrap both a heading and real paragraph prose.
+    // Keep the paragraph, without admitting link lists, badges or icon counters.
+    if (!element.matches('p,[data-as="p"]') || element.querySelector(PROTECTED_CONTENT)) return false;
+    const link = element.closest('a[href]');
+    return Boolean(link?.querySelector('h1,h2,h3,h4,h5,h6'));
+  }
   function sourcePart(node, roots, range, context) {
     if (!node.data || !allowed(node, context)) return '';
     if (range) {
@@ -390,8 +397,9 @@
       const {text, parts} = source;
       const prose = parts ? parts.filter(part => typeof part === 'string').join('') : text;
       if (text.length < 2 || !/\p{L}/u.test(prose)) continue;
-      // Short link-only blocks are usually navigation, not article prose.
-      if (!range && text.length < 160 && group.nodes.filter(n => normalize(n.textContent)).every(n => n.parentElement.closest('a'))) continue;
+      // Short link-only blocks are usually navigation, except prose inside a linked card.
+      if (!range && text.length < 160 && !isLinkedCardParagraph(group.element) &&
+          group.nodes.filter(n => normalize(n.textContent)).every(n => n.parentElement.closest('a'))) continue;
       if (!summary && !range && rendered.has(group.element)) { alreadyTranslated++; continue; }
       if (items.length >= 200 || characters + text.length > 60000) { limited = true; continue; }
       const id = crypto.randomUUID();

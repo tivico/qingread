@@ -442,6 +442,60 @@ test('documentation paragraphs stay separate and preserve inline literals while 
     assert.equal(result.stale.applied, false);
   } finally { await page.close(); }
 });
+test('short descriptions inside linked cards are prose while navigation and model metadata stay excluded',async()=>{
+  const page=await fixture('https://catalog.test/models');
+  try{
+    await page.setContent(`<nav><a href="/home"><h2>Navigation</h2><p>PRIVATE navigation description</p></a></nav>
+      <main><ul><li><a href="/model/alpha"><div><h2><span>alpha-9b</span></h2>
+      <p id="description">A small model for local coding and document search.</p></div>
+      <div><div>vision tools 9b</div><p><svg><path></path></svg><span>12K Pulls 4 Tags Updated yesterday</span></p></div></a></li>
+      <li><a href="/model/beta"><h3>beta-4b</h3><span data-as="p" id="second">A compact model for image understanding.</span></a></li></ul>
+      <p><a href="/pricing">Pricing</a> <a href="/docs">Docs</a></p>
+      <a href="/next"><p>Next page</p></a>
+      <form><a href="/account"><h2>Account</h2><p>PRIVATE form description</p></a></form>
+      <a href="/hidden" hidden><h2>Hidden</h2><p>PRIVATE hidden description</p></a></main>`);
+    const result=await page.evaluate(async()=>{
+      const original=document.querySelector('main').innerHTML;
+      const batch=await message({type:'qingread:collect',job:'cards',scope:'page'});
+      const summary=await message({type:'qingread:summary-source',job:'summary',scope:'page'});
+      for(const item of batch.items)await message({type:'qingread:apply',job:'cards',id:item.id,text:'人工卡片譯文'});
+      const adjacent=document.querySelector('#description').nextElementSibling?.matches('[data-qingread]');
+      await message({type:'qingread:display',translationOnly:true});
+      const replaced=document.querySelector('#description').getBoundingClientRect().height===0;
+      const href=document.querySelector('#description').closest('a').getAttribute('href');
+      const repeated=await message({type:'qingread:collect',job:'again',scope:'page'});
+      await message({type:'qingread:restore'});
+      return {batch,summary,adjacent,replaced,href,repeated,restored:original===document.querySelector('main').innerHTML};
+    });
+    const expected=['A small model for local coding and document search.','A compact model for image understanding.'];
+    assert.deepEqual(result.batch.items.map(i=>i.text),expected);
+    assert.deepEqual(result.summary.items.map(i=>i.text),expected);
+    assert.equal(result.adjacent,true);assert.equal(result.replaced,true);assert.equal(result.restored,true);
+    assert.equal(result.href,'/model/alpha');assert.equal(result.repeated.items.length,0);
+    assert.equal(result.repeated.reason,'translated');
+  }finally{await page.close();}
+});
+
+test('linked catalog descriptions continue beyond the paragraph cap without duplicate translations',async()=>{
+  const page=await fixture();
+  try{
+    await page.setContent('<main>'+Array.from({length:230},(_,i)=>`<a href="/model/${i}"><h2>model-${i}</h2><p>Compact model ${i} supports local document search.</p></a>`).join('')+'</main>');
+    const result=await page.evaluate(async()=>{
+      const batches=[];
+      for(let round=0;round<3;round++){
+        const job='round-'+round,batch=await message({type:'qingread:collect',job,scope:'page'});
+        batches.push(batch);
+        for(const item of batch.items)await message({type:'qingread:apply',job,id:item.id,text:'人工卡片譯文'});
+      }
+      return {batches,inserted:document.querySelectorAll('[data-qingread=translation]').length};
+    });
+    assert.deepEqual(result.batches.map(b=>b.items.length),[200,30,0]);
+    assert.deepEqual(result.batches.map(b=>b.limited),[true,false,false]);
+    assert.equal(new Set(result.batches.flatMap(b=>b.items.map(i=>i.text))).size,230);
+    assert.equal(result.inserted,230);
+  }finally{await page.close();}
+});
+
 const moeaArticleUrl='https://www.moea.gov.tw/MNS/doit/industrytech/IndustryTech.aspx?menu_id=13545&it_id=563#top';
 test('MOEA page-wrapper form yields article prose without form controls or site chrome',async()=>{
   const page=await fixture(moeaArticleUrl);
