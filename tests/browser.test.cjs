@@ -1472,6 +1472,35 @@ test('same-version stale helper disables document uploads and recovers after upd
   }finally{await page.close();}
 });
 
+test('rechecking during a PDF upload keeps both submit buttons locked until the request settles',async()=>{
+  const page=await readinessWorkspace();
+  try{
+    await page.evaluate(()=>{
+      const original=fetch;
+      globalThis.fetch=async(url,options)=>{
+        if(url.includes('/pdf?'))await new Promise(resolve=>{readyHarness.finishUpload=resolve;});
+        return original(url,options);
+      };
+    });
+    await page.locator('#pdf').setInputFiles({name:'sample.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-test')});
+    await page.selectOption('#pdf-source','ja');
+    await page.locator('#scanned').check();
+    await page.locator('#preview-pdf').click();
+    assert.match(await page.locator('#notice').textContent(),/掃描辨識僅支援英文/);
+    assert.equal(await page.evaluate(()=>Boolean(readyHarness.finishUpload)),false);
+    await page.locator('#scanned').uncheck();
+    await page.locator('#translate-pdf').click();
+    await page.waitForFunction(()=>Boolean(readyHarness.finishUpload));
+    await page.evaluate(()=>refresh());
+    for(const id of ['translate-pdf','preview-pdf'])assert.equal(await page.locator('#'+id).isDisabled(),true,id);
+    await page.evaluate(()=>{readyHarness.health.runtime.updateRequired=true;return refresh();});
+    await page.evaluate(()=>readyHarness.finishUpload());
+    await page.waitForFunction(()=>!document.querySelector('#pdf').disabled);
+    assert.equal(await page.locator('#translate-pdf').isDisabled(),true);
+    assert.equal(await page.evaluate(()=>readyHarness.uploads),1);
+  }finally{await page.close();}
+});
+
 test('connection recheck clears obsolete success and model choices after disconnection',async()=>{
   const page=await readinessWorkspace();
   try{
@@ -1479,6 +1508,9 @@ test('connection recheck clears obsolete success and model choices after disconn
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('#health').textContent.includes('尚未確認'));
     assert.equal(await page.locator('#model option').count(),0);
+    for(const id of ['save-model','prepare-pdf','prepare-speech','preview-pdf','translate-pdf']){
+      assert.equal(await page.locator('#'+id).isDisabled(),true,id);
+    }
     assert.match(await page.locator('#setup-checks').textContent(),/start.cmd/);
     assert.doesNotMatch(await page.locator('#health').textContent(),/已連線/);
   }finally{await page.close();}
@@ -1582,7 +1614,12 @@ test('PDF preview submits only explicit trial mode and renders phases plus cance
         else if(url.includes('/pdf?')){
           pdfHarness.uploads.push(url);
           pdfHarness.job={id:'a'.repeat(32),kind:'pdf',state:'running',phase:'ocr',message:'正在辨識掃描文字。',preview:true,page_count:3,current:1,total:2,outputs:[]};result=pdfHarness.job;
-        }else if(options.method==='DELETE'){pdfHarness.job.phase='cancelling';result={cancelling:true};}
+        }else if(options.method==='DELETE'){
+          pdfHarness.lastDelete=new URL(url).pathname;
+          if(url.endsWith('/cancel')){
+            pdfHarness.job.phase='cancelling';result={cancelling:true};
+          }else{pdfHarness.job=null;result={deleted:true};}
+        }
         else result={jobs:pdfHarness.job?[pdfHarness.job]:[]};
         return {ok:true,json:async()=>result};
       };
@@ -1598,12 +1635,16 @@ test('PDF preview submits only explicit trial mode and renders phases plus cance
     assert.match(await page.locator('#jobs').textContent(),/前 2 頁試翻.*本階段 1 \/ 2/s);
     await page.locator('#jobs button').filter({hasText:'取消工作'}).click();
     await page.waitForFunction(()=>document.querySelector('#jobs').textContent.includes('正在取消'));
+    assert.equal(await page.evaluate(()=>pdfHarness.lastDelete),'/jobs/'+'a'.repeat(32)+'/cancel');
     assert.equal(await page.locator('#jobs button').isDisabled(),true);
     await page.evaluate(()=>{pdfHarness.job.state='cancelled';pdfHarness.job.phase='cancelled';delete pdfHarness.job.current;delete pdfHarness.job.total;});
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('#jobs').textContent.includes('已取消'));
     assert.match(await page.locator('#jobs button').textContent(),/清除原檔/);
     assert.doesNotMatch(await page.locator('#jobs').textContent(),/本階段/);
+    await page.locator('#jobs button').click();
+    await page.waitForFunction(()=>document.querySelector('#jobs').textContent.includes('目前沒有工作'));
+    assert.equal(await page.evaluate(()=>pdfHarness.lastDelete),'/jobs/'+'a'.repeat(32));
   }finally{await page.close();}
 });
 
@@ -2114,8 +2155,11 @@ test('text tab rejects empty or oversized input before creating an engine and ke
     await page.locator('[data-view=text]').click();
     await page.locator('#text-start').click();
     await page.waitForFunction(()=>document.querySelector('#text-status').textContent.includes('請先輸入'));
-    // maxlength only limits typing; script-set or pasted values still reach the length check.
-    await page.evaluate(()=>{document.querySelector('#text-input').value='a'.repeat(6001);});
+    const oversized='a'.repeat(6000)+'Z';
+    await page.locator('#text-input').focus();
+    await page.keyboard.insertText(oversized);
+    assert.equal(await page.locator('#text-input').inputValue(),oversized);
+    assert.match(await page.locator('#text-status').textContent(),/最多 6,000/);
     await page.locator('#text-start').click();
     await page.waitForFunction(()=>document.querySelector('#text-status').textContent.includes('最多 6,000'));
     assert.equal(await page.evaluate(()=>harness.created),0);
@@ -2291,7 +2335,12 @@ test('switching tabs keeps text translation running and leaves webpage status un
     await page.locator('#text-start').click();
     await page.waitForFunction(()=>Boolean(harness.releaseText));
     await page.evaluate(()=>{harness.currentTab=8;harness.onActivated({tabId:8});});
+    await page.evaluate(()=>{
+      Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
     assert.equal(await page.locator('#text-stop').isEnabled(),true);
+    assert.equal(await page.locator('#stop').isDisabled(),true);
     assert.doesNotMatch(await page.locator('#text-status').textContent(),/已停止/);
     await page.evaluate(()=>harness.releaseText());
     await page.waitForFunction(()=>document.querySelector('#text-status').textContent.includes('翻譯完成'));
@@ -2685,6 +2734,13 @@ test('summary shows incremental text before completion and ignores updates after
   await page.evaluate(()=>{harness.summaryProgress({text:'晚到文字'});harness.summaryFinish();});
   assert.equal(await page.locator('#summary-result').textContent(),'第一個重點。');
   assert.match(await page.locator('#summary-status').textContent(),/尚未完成/);
+  assert.equal(await page.locator('#summary-copy').textContent(),'複製部分摘要');
+  await page.evaluate(()=>{
+    Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{harness.copied=text;}}});
+  });
+  await page.locator('#summary-copy').click();
+  assert.match(await page.evaluate(()=>harness.copied),/尚未完成[\s\S]*第一個重點/);
+  assert.match(await page.locator('#summary-copy-feedback').textContent(),/已複製/);
  }finally{await page.close();}
 });
 test('summary truncation is labeled as partial instead of completed',async()=>{

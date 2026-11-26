@@ -42,12 +42,16 @@
     const url = new URL(location.href), id = url.searchParams.get('v');
     if (url.hostname !== 'www.youtube.com' || url.pathname !== '/watch' || !/^[\w-]{11}$/.test(id || ''))
       return {error:'目前支援電腦版 YouTube 影片頁，請開啟 www.youtube.com/watch 的影片。'};
-    const watch = document.querySelector('ytd-watch-flexy[video-id]');
-    if (watch && watch.getAttribute('video-id') !== id) return {error:'影片正在切換，請等載入完成再試。'};
     const auto = message.prepare === true;
     if (auto && (typeof message.job !== 'string' || !/^[\w-]{1,80}$/.test(message.job))) return {error:'字幕讀取工作識別不正確，請重新開始。'};
     if (auto && preparation?.job === message.job && preparation.videoId !== id) return {error:'擷取期間影片已變更，請重新開始。'};
     if (auto && preparation?.job !== message.job) preparation = {job:message.job,videoId:id,actions:new Set(),signature:null,stableSince:0};
+    const watch = document.querySelector('ytd-watch-flexy[video-id]');
+    if (watch && watch.getAttribute('video-id') !== id) {
+      if (!auto) return {error:'影片正在切換，請等載入完成再試。'};
+      preparation.signature=null;
+      return pending('正在等播放器載入目前影片…');
+    }
     const panels = transcriptRoots();
     if (panels.length > 1) return {error:'偵測到多份字幕記錄，請關閉多餘的逐字稿後重試。'};
     if (!panels.length) {

@@ -28,7 +28,7 @@ class PackageTest(unittest.TestCase):
             if item.is_file() and item.suffix in ('.py', '.cmd', '.txt'):
                 shutil.copy2(item, self.root / 'companion' / item.name)
         shutil.copytree(ROOT / 'companion/licenses', self.root / 'companion/licenses')
-        for name in ('README.md', 'CHANGELOG.md', 'THIRD_PARTY.md', 'package.json', '.gitignore', '.gitattributes'):
+        for name in ('QingRead-Install.pdf', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY.md', 'package.json', '.gitignore', '.gitattributes'):
             shutil.copy2(ROOT / name, self.root / name)
         self.version = json.loads((self.root / 'package.json').read_text(encoding='utf-8'))['version']
 
@@ -71,7 +71,7 @@ class PackageTest(unittest.TestCase):
                 self.assertNotIn('private.json', files)
                 self.assertEqual(json.loads(files['manifest.json'])['version'], self.version)
             else:
-                for required in ('docs/PROGRESS.md', 'CHANGELOG.md', 'README.md', '.gitignore',
+                for required in ('QingRead-Install.pdf', 'docs/PROGRESS.md', 'CHANGELOG.md', 'README.md', '.gitignore',
                                  'companion/install.cmd', 'companion/start.cmd',
                                  'companion/launcher.py', 'companion/runtime_status.py',
                                  'tests/fixtures/translation-quality.json',

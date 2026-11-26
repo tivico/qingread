@@ -45,7 +45,7 @@ function controls(busy) {
   $('text-start').disabled = busy || !ready;
   $('source').disabled = busy; $('scope').disabled = busy;
   $('terms').disabled = busy;
-  $('stop').disabled = !busy;
+  $('stop').disabled = !busy || running?.kind === 'text';
   $('restore').disabled = busy;
   $('engine').disabled = busy; $('detect').disabled = busy;
   $('glossary').disabled = busy; $('save-glossary').disabled = busy;
@@ -119,7 +119,7 @@ function showFailure(error, job) {
     : '重新整理網頁後重試。';
   status(unknown ? `${label}失敗，尚無法確認原因。` : failure(error),
     `失敗步驟：${label}
-清讀 0.3.9 · ${$('engine').value} · ${$('source').value} → zh-Hant
+清讀 0.3.10 · ${$('engine').value} · ${$('source').value} → zh-Hant
 診斷：${pageError ? 'page-read' : stage} / ${name}
 ${hint}`);
   if (error.name === 'PageAccessError') showSiteAccessControls();
@@ -133,6 +133,10 @@ function assertLive(job) {
 function cancel(reason) {
   const job = running;
   if (!job) return;
+  if (job.kind === 'text') {
+    job.controller.abort();
+    return;
+  }
   running = null;
   job.controller.abort();
   const cleanup = job.translator?.destroy();
@@ -359,7 +363,7 @@ chrome.tabs.onRemoved?.addListener(id => { if (running?.tabId === id) cancel('�
 window.addEventListener('pagehide', () => cancel('側邊欄已關閉。'));
 document.addEventListener('visibilitychange', () => {
   // Another app can cover the browser while the panel and source document stay alive.
-  if (document.visibilityState === 'hidden' && running?.kind !== 'web') cancel('側邊欄已隱藏，翻譯已停止。');
+  if (document.visibilityState === 'hidden' && !['web','text'].includes(running?.kind)) cancel('側邊欄已隱藏，翻譯已停止。');
 });
 (async () => {
   void syncDisplayMode();
@@ -378,14 +382,14 @@ document.addEventListener('visibilitychange', () => {
     $('terms').checked = preferences.terms === true;
   } catch { /* Preferences are optional; never prevent translation. */ }
   await checkAvailability();
-  $('start').textContent = '開始翻譯'; controls(false);
+  $('start').textContent = '開始翻譯'; controls(Boolean(running));
   status(ready ? '準備好了，請開啟外文網頁後開始。' : (typeof globalThis.Translator?.create === 'function' ? '所選語言組合尚未準備好，請查看引擎狀態。' : '這個 Chrome 尚未提供本機翻譯介面。'), ready ? '請先選對原文語言。側邊欄只在你按開始後擷取網頁。' : '可重新選擇語言、更新瀏覽器或手動改用本機助手；不會自動切換雲端服務。');
 })();
 $('save-glossary').onclick = async () => {
   try {
     const rules = QingReadCore.parseGlossary($('glossary').value);
     await chrome.storage.local.set({glossary:$('glossary').value}); glossaryRules = rules;
-    $('glossary-status').textContent = `已儲存 ${rules.length} 組，套用於下次網頁／字幕翻譯。舊網頁譯文請先還原；PDF 不套用。`;
+    $('glossary-status').textContent = `已儲存 ${rules.length} 組，套用於下次文字、網頁與字幕翻譯。舊網頁譯文請先還原；PDF 不套用。`;
   } catch(error) { $('glossary-status').textContent = error.message; }
 };
 $('workspace').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('workspace.html') });

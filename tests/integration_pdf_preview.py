@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(dir=ROOT/'test-results') as directory:
             second=helper.start_pdf(raw,'en',preview=True)
             deadline=time.monotonic()+5
             while helper.get_job(second['id'])['process'] is None and time.monotonic()<deadline:time.sleep(.01)
-            started=time.monotonic();helper.delete_job(second['id'])
+            started=time.monotonic();helper.delete_job(second['id'],cancel_only=True)
             while time.monotonic()-started<15:
                 cancelled=helper.get_job(second['id'])
                 if cancelled['state'] not in ('queued','running'):break

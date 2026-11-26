@@ -2,6 +2,12 @@
 
 每次修改記錄日期、使用者可觀察到的差異、驗證與限制；版本號以 `extension/manifest.json`、`package.json`、`companion/app.py` 為準。安裝包提供與商店發布分開記錄，不把 Git 提交當成已部署或已驗收。
 
+## 0.3.10 · 2026-11-26 · Windows 親友試用候選版
+
+- 將 0.3.9 之後的網頁擷取與授權修正、翻譯中斷恢復、YouTube 逐字稿摘要與 PDF 取消處理納入同一套件。
+- 首次試讀可先使用 Chrome 語言包。安裝說明提供網頁翻譯、還原、重開後再用及回報方式。
+- 外掛、助手與套件均使用 0.3.10。另一台 Windows 由親友自行安裝及隔日重用仍待回報。
+
 ## 0.3.9 · 2026-11-04 · Windows 親友試用版
 
 - 原始碼目的地為 [tivico/qingread](https://github.com/tivico/qingread)，README 與安裝說明補上由儲存庫取得原始碼的路徑。本批 GitHub 發佈以原始碼、測試與文件為範圍。

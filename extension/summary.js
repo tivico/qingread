@@ -3,6 +3,17 @@
   const el = id => document.getElementById(id);
   let task = null, sourceTabId = null, sourceWindowId = null, accessTarget = null;
   let captured = false, sourceLabel = '', sourceChanged = false;
+  let copyRevision = 0;
+  function resetCopy() {
+    copyRevision++;
+    el('summary-copy').disabled = true;
+    el('summary-copy').textContent = '複製摘要';
+    el('summary-copy-feedback').textContent = '';
+  }
+  function allowCopy(partial) {
+    el('summary-copy').disabled = false;
+    el('summary-copy').textContent = partial ? '複製部分摘要' : '複製摘要';
+  }
   function showSource() {
     el('summary-source').hidden = !sourceLabel;
     el('summary-source').textContent = sourceLabel ? `摘要來源：${sourceLabel}。${captured ? '依開始時擷取的原文整理，可切換分頁。' : task ? '正在擷取原文。' : '原文尚未擷取完成。'}${sourceChanged ? '下方保留的是上述來源的原文快照，不會隨網頁更新。' : ''}` : '';
@@ -20,6 +31,7 @@
     task?.controller.abort(); task = null; showSource();
     el('summary-start').disabled = false; el('summary-stop').disabled = true;
     el('summary-status').textContent = message + (wasRunning && el('summary-result').textContent ? ' 下方是尚未完成的部分摘要。' : '');
+    if (wasRunning && el('summary-result').textContent) allowCopy(true);
     if(old?.request){
       const prior=el('summary-status').textContent,cancelling=prior+' 正在通知助手取消…';
       el('summary-status').textContent=cancelling;
@@ -31,7 +43,7 @@
     accessTarget = null; el('summary-grant').hidden = true;
     el('summary-site-entry').hidden=true;el('summary-site-url').value='';
     stop('頁面已變更，請重新整理摘要。'); sourceTabId = null; sourceWindowId = null;
-    el('summary-result').textContent = ''; el('summary-copy').disabled = true;
+    el('summary-result').textContent = ''; resetCopy();
     el('summary-output').hidden = true;
   }
   el('summary-start').onclick = async () => {
@@ -41,7 +53,7 @@
     accessTarget = null; el('summary-grant').hidden = true;
     el('summary-site-entry').hidden=true;el('summary-site-url').value='';
     el('summary-start').disabled = true; el('summary-stop').disabled = false;
-    el('summary-copy').disabled = true; el('summary-result').textContent = '';
+    resetCopy(); el('summary-result').textContent = '';
     el('summary-output').hidden = true;
     el('summary-status').textContent = '正在讀取本頁正文…';
     try {
@@ -83,13 +95,16 @@
       if (typeof result?.text !== 'string' || !result.text.trim()) throw new Error('模型沒有回傳摘要。');
       el('summary-result').textContent = result.text;
       el('summary-output').hidden = false;
-      el('summary-copy').disabled = false;
+      allowCopy(result.truncated);
       el('summary-status').textContent = (result.truncated ? '已達輸出上限，下方是部分摘要。' : result.cached ? '摘要已完成，沿用相同內容與模型的近期結果。' : '摘要已完成，請看「摘要結果」。') + coverage + '。摘要可能有遺漏或誤解，請對照原文。';
       revealResult();
     } catch (error) {
       if (task === job) {
         el('summary-status').textContent = ['TimeoutError','PageAccessError','PageReadError','PageRestrictedError','PageMissingError','PageChangedError','ExtensionLoadError','PageInjectionError'].includes(error.name) ? QingReadCore.errorText(error) : (error.name === 'AbortError' ? '已停止摘要。' : error.message === '找不到此功能。' ? '請重新啟動新版本機助手，再整理摘要。' : error.message);
-        if(job.hasText)el('summary-status').textContent+=' 下方僅為已收到的部分摘要，尚未完成。';
+        if(job.hasText){
+          el('summary-status').textContent+=' 下方僅為已收到的部分摘要，尚未完成。';
+          allowCopy(true);
+        }
         if (error.name === 'PageAccessError') {
           accessTarget = error.accessTarget;
           el('summary-grant').textContent = accessTarget?.origin ? '允許 ' + new URL(accessTarget.origin).hostname : '檢查網站存取';
@@ -129,8 +144,13 @@
     catch{el('summary-grant').textContent='檢查網站存取';}
   });
   el('summary-copy').onclick = async () => {
-    try { await navigator.clipboard.writeText(el('summary-source').textContent + '\n' + el('summary-status').textContent + '\n\n' + el('summary-result').textContent); }
-    catch { el('summary-status').textContent = '複製未成功，可直接反白摘要文字複製。'; }
+    const revision = ++copyRevision;
+    try {
+      await navigator.clipboard.writeText(el('summary-source').textContent + '\n' + el('summary-status').textContent + '\n\n' + el('summary-result').textContent);
+      if (revision === copyRevision) el('summary-copy-feedback').textContent = '已複製摘要與來源。';
+    } catch {
+      if (revision === copyRevision) el('summary-copy-feedback').textContent = '複製未成功，可直接反白摘要文字複製。';
+    }
   };
   chrome.tabs.onActivated.addListener(info => {
     if (Number.isInteger(sourceWindowId) && Number.isInteger(info.windowId) && info.windowId !== sourceWindowId) return;

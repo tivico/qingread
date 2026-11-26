@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "清讀 · 本機雙語翻譯",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "手動啟動、在裝置上翻譯的繁體中文雙語閱讀工具。無帳號、無雲端翻譯後端。",
   "minimum_chrome_version": "138",
   "permissions": ["activeTab", "scripting", "storage", "sidePanel", "offscreen"],

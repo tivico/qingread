@@ -137,6 +137,34 @@ class CompanionTest(unittest.TestCase):
         restored.delete_job(job['id'])
         self.assertFalse(directory.exists())
         with self.assertRaises(UserError): restored.delete_job('../outside')
+    def test_late_or_repeated_http_cancel_preserves_files_until_explicit_delete(self):
+        job, directory = self.app.new_job('pdf')
+        result_file = directory / 'synthetic.pdf'
+        result_file.write_bytes(b'%PDF-sample')
+        server = make_server(self.app, 0)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        url = f"http://127.0.0.1:{server.server_port}/jobs/{job['id']}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        def delete(path):
+            req = urllib.request.Request(url + path, method='DELETE',
+                headers={'Authorization': 'Bearer ' + self.app.config['token']})
+            with opener.open(req, timeout=5) as response:
+                return json.load(response)
+        try:
+            self.assertTrue(delete('/cancel')['cancelling'])
+            self.assertTrue(job['cancel'].is_set())
+            for state in ('done', 'failed', 'cancelled'):
+                job['state'] = state
+                self.assertEqual(delete('/cancel'), {'cancelling': False, 'state': state})
+                self.assertEqual(result_file.read_bytes(), b'%PDF-sample')
+            self.assertTrue(delete('')['deleted'])
+            self.assertFalse(directory.exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
     def test_expiry_preserves_active_job(self):
         import os,time
         job,directory=self.app.new_job('pdf')

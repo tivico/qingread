@@ -3,20 +3,27 @@
   const el = id => document.getElementById(id);
   let active = null;
   let retry = null;
+  const inputLimit = 6000;
+  const limitLabel = inputLimit.toLocaleString('en-US');
+  const limitMessage = `每次最多 ${limitLabel} 字元。已保留完整原文，請分次翻譯。`;
   const settings = () => JSON.stringify([el('source').value,el('engine').value,el('terms').checked,glossaryRules]);
   const preservesChinese = input => el('engine').value === 'chrome' &&
     ['en','de','fr','es'].includes(el('source').value) && /\p{Script=Han}/u.test(input);
   let outputComplete = false, outputRevision = 0, outputWarnings=[];
   function count() {
     const input = el('text-input').value;
-    el('text-count').textContent = `${input.length.toLocaleString()} / 6,000 字元`;
+    el('text-count').textContent = `${input.length.toLocaleString()} / ${limitLabel} 字元`;
+    el('text-input').setAttribute('aria-invalid', String(input.length > inputLimit));
     el('text-language-hint').textContent = preservesChinese(input)
       ? `Chrome 語言包，${LANGUAGES[el('source').value]} → 繁體中文。中文會保留，外文分段翻譯。請確認專有名詞與權限名稱。`
       : `目前使用${el('engine').value === 'chrome' ? ' Chrome 語言包' : '本機模型'}，${LANGUAGES[el('source').value]} → 繁體中文。`;
   }
   function invalidate() { retry=null;el('text-retry').hidden=true;outputComplete = false;outputWarnings=[]; outputRevision++; el('text-output').value = ''; el('text-copy').disabled = true; count(); }
   function stop() { active?.controller.abort(); }
-  el('text-input').addEventListener('input', () => { invalidate(); el('text-status').textContent = '原文已變更，請重新翻譯。'; });
+  el('text-input').addEventListener('input', () => {
+    invalidate();
+    el('text-status').textContent = el('text-input').value.length > inputLimit ? limitMessage : '原文已變更，請重新翻譯。';
+  });
   el('text-clear').onclick = () => {
     stop(); el('text-input').value = ''; invalidate();
     el('text-status').textContent = '已清空原文與譯文。';
@@ -26,7 +33,7 @@
     if (!ready || running) return;
     const input = el('text-input').value;
     if (!input.trim()) { el('text-status').textContent = '請先輸入或貼上原文。'; el('text-input').focus(); return; }
-    if (input.length > 6000) { el('text-status').textContent = '每次最多 6,000 字元，請分次翻譯。'; return; }
+    if (input.length > inputLimit) { el('text-status').textContent = limitMessage; el('text-input').focus(); return; }
     const snapshot = settings(), saved = resume ? retry : null;
     if(resume && (!saved || saved.input!==input || saved.settings!==snapshot)) {
       retry=null;el('text-retry').hidden=true;el('text-status').textContent='原文或翻譯設定已變更，請重新翻譯全文。';return;

@@ -1,15 +1,23 @@
 # 清讀 · 本機繁中翻譯
 
-版本 **0.3.9，Windows 親友試用版**。「Chrome 外掛＋每台電腦自己的本機助手」，供自己與親友在本機安裝使用。不需要付費翻譯 API；首次需要下載資源、磁碟、記憶體與運算時間。第一次使用請先讀[安裝與更新步驟](extension/INSTALL.txt)；功能及驗證範圍見下方與[維護紀錄](docs/PROGRESS.md)。
+**0.3.10 · Windows 親友試用版**。清讀能在原網頁顯示繁中譯文，保留原文供對照。解壓 `qingread-complete-0.3.10.zip` 後，打開最外層的 [Windows 安裝說明（PDF）](QingRead-Install.pdf)。第一頁帶你用 Chrome 語言包翻譯一篇文章，第二頁說明選用的本機助手。更新與回復舊版請見 [INSTALL.txt](extension/INSTALL.txt)。
 
-原始碼儲存庫：[tivico/qingread](https://github.com/tivico/qingread)。可下載儲存庫原始碼並解壓到固定位置，或使用：
+這份候選套件納入下方截至 11 月 25 日的功能與修正。舊版號與尚未打包的敘述保留作為當時的維護紀錄。親友試用請以本版 ZIP 為準。原始碼位於 [tivico/qingread](https://github.com/tivico/qingread)。
+
+也可下載儲存庫原始碼並解壓到固定位置，或使用下列指令取得已提交版本，再依安裝說明載入 `extension`。
 
 ```powershell
 git clone https://github.com/tivico/qingread.git
 cd qingread
 ```
 
-接著依安裝說明準備 `companion` 並在 Chrome 載入 `extension`。儲存庫不含模型、Python 環境、配對資料或個人文件，需在自己的電腦準備。`releases/qingread-complete-0.3.9.zip` 是本機打包指令產生的安裝套件，這次 GitHub 上傳範圍為原始碼，沒有另行建立 GitHub Release 或上傳 ZIP。
+## 文字貼上、部分摘要與 PDF 取消修正（2026-11-25）
+
+貼上超過 6,000 字元時，文字翻譯會保留完整原文並提示分次處理。翻譯中可以切到其他視窗，保持側欄開啟即可。網頁摘要中途停止或斷線時，已收到的內容可以用「複製部分摘要」帶走，複製內容會附上來源與未完成標示。
+
+影片精簡摘要會請模型合併重複說法，優先保留後段新增的限制與時間。文件工作室會在斷線後停用送件，上傳期間重新檢查連線也會保持按鈕鎖定。「取消工作」遇到剛完成的工作時會保留檔案，完成後仍可下載。
+
+更新請先等現有工作結束，再執行 `companion/start.cmd`、在 Chrome 重新載入外掛，並重開側欄與文件工作室。使用解壓原始碼的版本即可套用。重現方式、測試範圍與維護說明見[功能巡檢與修正紀錄](docs/PROGRESS.md#文字輸入摘要與文件工作取消2026-11-25)。
 
 ## 模型列表短介紹漏翻修正（2026-11-25）
 
@@ -433,7 +441,7 @@ text.js：按「翻譯文字」時，在 click 的同步階段呼叫 panel.js �
 
 本輪最終驗證：31 項 JavaScript 單元測試、82 項瀏覽器流程全部通過。取消相關 3 項新測試已先在舊實作重現失敗，再於修正後通過。Python 助手未修改，未重跑其測試。
 
-文字與網頁翻譯共用 `panel.js` 的 `running` 工作鎖，同一時間只跑一筆翻譯。一邊在翻時，另一邊的開始按鈕停用。語言包下載進度透過 `job.report` 顯示在文字頁籤自己的狀態列。`tabs.onActivated` 允許 `kind:'text'` 的貼上文字翻譯，以及已綁定來源文件的網頁翻譯繼續。關閉或隱藏側欄仍會停止文字翻譯。
+文字與網頁翻譯共用 `panel.js` 的 `running` 工作鎖，同一時間只跑一筆翻譯。一邊在翻時，另一邊的開始按鈕停用。語言包下載進度透過 `job.report` 顯示在文字頁籤自己的狀態列。`tabs.onActivated` 允許 `kind:'text'` 的貼上文字翻譯，以及已綁定來源文件的網頁翻譯繼續。自 2026-11-25 的原始碼更新起，暫時切到別的視窗也會繼續文字翻譯，手動停止或關閉側欄時才取消。
 
 助手版本：app.py 新增 VERSION 常數，/health 與 HTTP Server 標頭改回報實際版本（原本寫死 0.2.0／0.2）。外掛目前還沒讀這個欄位；它的用途是排查時確認執行中的是不是新版 start.cmd，不必再從新功能回 404「找不到此功能」去推測。手動查詢（配對碼取自助手視窗，不要貼進紀錄或截圖）：
 
@@ -666,7 +674,7 @@ Debug：PageMissingError 表示找不到分頁；PageRestrictedError 表示已�
 
 ## 親友首次安裝
 
-提供 **0.3.9 Windows 安裝腳本套件**。下載／轉交 `qingread-complete-0.3.9.zip` 後先解壓到固定資料夾；只要外掛且已備妥新版助手，可使用 `qingread-0.3.9.zip`。這批以自己／親友安裝為範圍。
+完整試用包為 `qingread-complete-0.3.10.zip`，外掛專用包為 `qingread-0.3.10.zip`。先用 Chrome 語言包讀網頁可直接照 [首次試讀步驟](extension/INSTALL.txt) 操作。需要使用本機助手時，請依下列步驟準備。
 
 1. 使用桌面 Chrome 138 以上，功能支援仍以實機為準。
 2. 從 [Ollama 官方網站](https://ollama.com/download/windows) 安裝並啟動 Ollama，下載一個本機文字模型。助手會拒絕雲端代理模型。
@@ -875,7 +883,7 @@ npm run test:browser
 
 發行前執行 `companion/.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_package.py'`，它在隔離副本放入假私密資料，驗證不被打包、版本一致、檔案與原始碼逐位元相同、校驗資訊正確及暫存清理。打包後可執行 `companion/.venv/Scripts/python.exe tests/verify_release.py --native`，核對實際 ZIP、包內助手版本及原生 Chrome；測試需可用的 Chromium／Playwright，可用 `CHROME_PATH` 指定測試瀏覽器。單獨測外掛也可先解壓，設定 `QINGREAD_EXTENSION_PATH` 後執行 `node tests/extension-smoke.cjs`。日後新增外掛／助手模組，務必更新 `scripts/package.ps1` 的檔案清單，重新打包及驗證成品。0.3.9 已通過 70 項 JavaScript、58 項 Python 與上述實際成品驗證；另一台全新 Windows 的從零安裝仍須初驗。
 
-更新既有安裝時，先停止工作，保留自己的 `companion/data` 與 `.venv`，使用新版程式更新原本位置；在原 Chrome 項目重新載入並重啟助手，核對兩邊均為 0.3.9。完整回復步驟見 [INSTALL.txt](extension/INSTALL.txt)。每位親友各自安裝及配對，轉交發行 ZIP 即可，不要直接壓縮目前開發資料夾。商店發布、簽署與自動更新屬另外的部署流程。
+更新既有安裝時，先停止工作，保留自己的 `companion/data` 與 `.venv`，使用新版程式更新原本位置；在原 Chrome 項目重新載入並重啟助手，核對兩邊均為 0.3.10。完整回復步驟見 [INSTALL.txt](extension/INSTALL.txt)。每位親友各自安裝及配對，轉交發行 ZIP 即可，不要直接壓縮目前開發資料夾。商店發布、簽署與自動更新屬另外的部署流程。
 
 ## 技術依據
 

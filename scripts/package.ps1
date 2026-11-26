@@ -25,7 +25,7 @@ $companionFiles = @(
     'prepare.py', 'install.cmd', 'start.cmd', 'requirements.txt', 'requirements-lock.txt',
     'licenses/BabelDOC-AGPL-3.0.txt'
 )
-$files = @('README.md', 'CHANGELOG.md', 'THIRD_PARTY.md', 'package.json', '.gitignore', '.gitattributes', 'docs/PROGRESS.md', 'scripts/package.ps1')
+$files = @('QingRead-Install.pdf', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY.md', 'package.json', '.gitignore', '.gitattributes', 'docs/PROGRESS.md', 'scripts/package.ps1')
 $files += $extensionFiles | ForEach-Object { 'extension/' + $_ }
 $files += $companionFiles | ForEach-Object { 'companion/' + $_ }
 # Test source and the known fixture directory only; never bytecode, recordings,

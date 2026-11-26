@@ -47,6 +47,22 @@ test('filtered, hidden, missing-time, wrong-video and unsupported transcript sou
   }finally{await page.close();}
  }
 });
+test('one click waits for the player to match the requested video before reading the transcript',async()=>{
+ const page=await transcript();
+ try{
+  await page.clock.install();
+  await page.evaluate(()=>document.querySelector('ytd-watch-flexy').setAttribute('video-id',''));
+  const loading=await page.evaluate(()=>readTranscript({prepare:true,job:'loading'}));
+  assert.equal(loading.pending,true);assert.equal(loading.segments,undefined);
+  await page.evaluate(id=>document.querySelector('ytd-watch-flexy').setAttribute('video-id',id),videoId);
+  const stabilizing=await page.evaluate(()=>readTranscript({prepare:true,job:'loading'}));
+  assert.equal(stabilizing.pending,true);
+  await page.clock.fastForward(700);
+  const result=await page.evaluate(()=>readTranscript({prepare:true,job:'loading'}));
+  assert.equal(result.videoId,videoId);assert.equal(result.segments.length,2);
+ }finally{await page.close();}
+});
+
 test('invalid rows are reported as omitted instead of claiming full coverage',async()=>{
  const page=await transcript();try{
   await page.evaluate(()=>document.querySelector('.segment-timestamp').textContent='1:99');
